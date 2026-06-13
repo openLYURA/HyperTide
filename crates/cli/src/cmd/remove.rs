@@ -23,12 +23,15 @@ pub(crate) async fn execute(args: RemoveArgs) -> Result<()> {
     upsert_stage_asset(&mut stage, &args.asset_path, None);
     save_stage(&stage)?;
     if json_output_enabled() {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "ok": true,
-            "asset_path": args.asset_path,
-            "branch": stage.branch,
-            "staged_count": stage.assets.len(),
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "asset_path": args.asset_path,
+                "branch": stage.branch,
+                "staged_count": stage.assets.len(),
+            }))?
+        );
     } else {
         println!(
             "staged delete for {} on {} ({} asset(s) staged)",

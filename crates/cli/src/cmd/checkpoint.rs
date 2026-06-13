@@ -93,12 +93,15 @@ async fn checkpoint_create(args: CheckpointCreateArgs) -> Result<()> {
         current_session_id: Some(session_id),
     })?;
     if json_output_enabled() {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "ok": true,
-            "checkpoint_id": checkpoint.checkpoint_id,
-            "session_id": checkpoint.session_id,
-            "asset_count": checkpoint.assets.len(),
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "session_id": checkpoint.session_id,
+                "asset_count": checkpoint.assets.len(),
+            }))?
+        );
     } else {
         println!(
             "checkpoint created: checkpoint_id={} session_id={} asset_count={}",
@@ -116,14 +119,17 @@ async fn checkpoint_restore(args: CheckpointRestoreArgs) -> Result<()> {
     let snapshot = fetch_checkpoint_snapshot(&client, &mut profile, &args.id).await?;
     materialize_checkpoint_snapshot(&client, &mut profile, &snapshot).await?;
     if json_output_enabled() {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "ok": true,
-            "checkpoint_id": snapshot.checkpoint_id,
-            "session_id": snapshot.session_id,
-            "repo_id": snapshot.repo_id,
-            "branch": snapshot.branch,
-            "asset_count": snapshot.assets.len(),
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "checkpoint_id": snapshot.checkpoint_id,
+                "session_id": snapshot.session_id,
+                "repo_id": snapshot.repo_id,
+                "branch": snapshot.branch,
+                "asset_count": snapshot.assets.len(),
+            }))?
+        );
     } else {
         println!(
             "checkpoint restored: checkpoint_id={} session_id={} repo_id={} branch={} asset_count={}",
@@ -169,12 +175,15 @@ async fn checkpoint_branch(args: CheckpointBranchArgs) -> Result<()> {
     stage.base_changeset_id = snapshot.base_changeset_id.clone();
     save_stage(&stage)?;
     if json_output_enabled() {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "ok": true,
-            "checkpoint_id": args.id,
-            "branch": args.name,
-            "asset_count": snapshot.assets.len(),
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "checkpoint_id": args.id,
+                "branch": args.name,
+                "asset_count": snapshot.assets.len(),
+            }))?
+        );
     } else {
         println!(
             "branched from checkpoint: checkpoint_id={} branch={} asset_count={}",

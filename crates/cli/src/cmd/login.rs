@@ -44,12 +44,15 @@ pub(crate) async fn execute(args: LoginArgs) -> Result<()> {
 
     save_profile(&profile)?;
     if json_output_enabled() {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "ok": true,
-            "server": profile.server,
-            "branch": profile.current_branch,
-            "mode": if profile.api_key_direct { "api-key-direct" } else { "jwt" },
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "server": profile.server,
+                "branch": profile.current_branch,
+                "mode": if profile.api_key_direct { "api-key-direct" } else { "jwt" },
+            }))?
+        );
     } else {
         println!(
             "login saved: server={}, branch={}, mode={}",

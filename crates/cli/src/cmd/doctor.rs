@@ -140,10 +140,8 @@ pub(crate) async fn execute(_args: DoctorArgs) -> Result<()> {
                 } else if let Some(expires_at) = profile.access_token_expires_at {
                     let remaining = expires_at - now_unix();
                     if remaining < 300 {
-                        let msg = format!(
-                            "expires in {}s — consider 'ht login' to refresh",
-                            remaining
-                        );
+                        let msg =
+                            format!("expires in {}s — consider 'ht login' to refresh", remaining);
                         if !json_output_enabled() {
                             println!("[warn] token: {}", msg);
                         }
@@ -260,13 +258,16 @@ pub(crate) async fn execute(_args: DoctorArgs) -> Result<()> {
     // 输出结果
     if json_output_enabled() {
         let ok = err_count == 0;
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "ok": ok,
-            "checks": checks,
-            "ok_count": ok_count,
-            "warn_count": warn_count,
-            "err_count": err_count,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": ok,
+                "checks": checks,
+                "ok_count": ok_count,
+                "warn_count": warn_count,
+                "err_count": err_count,
+            }))?
+        );
     } else {
         println!();
         println!(

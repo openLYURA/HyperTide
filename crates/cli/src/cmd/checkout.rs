@@ -106,12 +106,15 @@ pub(crate) async fn execute(args: CheckoutArgs) -> Result<()> {
     save_stage(&stage)?;
 
     if json_output_enabled() {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "ok": true,
-            "repo": repo,
-            "branch": branch,
-            "asset_count": workspace.checked_out_assets.len(),
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "repo": repo,
+                "branch": branch,
+                "asset_count": workspace.checked_out_assets.len(),
+            }))?
+        );
     } else {
         println!(
             "checked out {}@{} to {} ({} assets)",

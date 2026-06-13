@@ -130,10 +130,13 @@ async fn lock_force_release(args: LockForceReleaseArgs) -> Result<()> {
         )));
     }
     if json_output_enabled() {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "ok": true,
-            "path": args.path,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "path": args.path,
+            }))?
+        );
     } else {
         println!("lock force-released: {}", args.path);
     }

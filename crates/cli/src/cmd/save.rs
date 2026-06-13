@@ -46,12 +46,15 @@ pub(crate) async fn execute(args: SaveArgs) -> Result<()> {
         current_session_id: Some(session_id),
     })?;
     if json_output_enabled() {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "ok": true,
-            "checkpoint_id": checkpoint.checkpoint_id,
-            "session_id": checkpoint.session_id,
-            "asset_count": checkpoint.assets.len(),
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "session_id": checkpoint.session_id,
+                "asset_count": checkpoint.assets.len(),
+            }))?
+        );
     } else {
         println!(
             "save done: checkpoint_id={} session_id={} asset_count={}",

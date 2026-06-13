@@ -79,10 +79,13 @@ async fn branch_create(args: BranchCreateArgs) -> Result<()> {
         )));
     }
     if json_output_enabled() {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "ok": true,
-            "branch": args.name,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "branch": args.name,
+            }))?
+        );
     } else {
         println!("branch created: {}", args.name);
     }
@@ -184,10 +187,13 @@ async fn branch_switch(args: BranchSwitchArgs) -> Result<()> {
     stage.assets.clear();
     save_stage(&stage)?;
     if json_output_enabled() {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "ok": true,
-            "branch": profile.current_branch,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "branch": profile.current_branch,
+            }))?
+        );
     } else {
         println!("switched to branch {}", profile.current_branch);
     }

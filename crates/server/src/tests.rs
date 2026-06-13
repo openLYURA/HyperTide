@@ -1079,9 +1079,7 @@ async fn lock_renew_happy_path() {
         .uri("/v2/locks/acquire")
         .header("content-type", "application/json")
         .header("X-API-Key", test_master_key())
-        .body(Body::from(
-            r#"{"file_path":"assets/renew-test.txt"}"#,
-        ))
+        .body(Body::from(r#"{"file_path":"assets/renew-test.txt"}"#))
         .expect("acquire request");
     let acquire_response = app
         .clone()
@@ -1096,9 +1094,7 @@ async fn lock_renew_happy_path() {
         .uri("/v2/locks/renew")
         .header("content-type", "application/json")
         .header("X-API-Key", test_master_key())
-        .body(Body::from(
-            r#"{"file_path":"assets/renew-test.txt"}"#,
-        ))
+        .body(Body::from(r#"{"file_path":"assets/renew-test.txt"}"#))
         .expect("renew request");
     let renew_response = app.oneshot(renew_request).await.expect("renew response");
     assert_eq!(renew_response.status(), StatusCode::OK);
@@ -1168,9 +1164,7 @@ async fn auth_generate_rejects_missing_api_key() {
         .method("POST")
         .uri("/v2/auth/generate")
         .header("content-type", "application/json")
-        .body(Body::from(
-            r#"{"owner_id":"test","permissions":["lock"]}"#,
-        ))
+        .body(Body::from(r#"{"owner_id":"test","permissions":["lock"]}"#))
         .expect("request");
 
     let response = app.oneshot(request).await.expect("response");
@@ -1260,9 +1254,7 @@ async fn non_owner_cannot_release_lock() {
         .uri("/v2/locks/acquire")
         .header("content-type", "application/json")
         .header("X-API-Key", test_master_key())
-        .body(Body::from(
-            r#"{"file_path":"assets/owner-test.txt"}"#,
-        ))
+        .body(Body::from(r#"{"file_path":"assets/owner-test.txt"}"#))
         .expect("acquire request");
     let acquire_response = app
         .clone()
@@ -1325,14 +1317,9 @@ async fn non_admin_cannot_access_admin_routes() {
         .uri("/v2/auth/generate")
         .header("content-type", "application/json")
         .header("X-API-Key", &non_admin_key)
-        .body(Body::from(
-            r#"{"owner_id":"test","permissions":["lock"]}"#,
-        ))
+        .body(Body::from(r#"{"owner_id":"test","permissions":["lock"]}"#))
         .expect("admin request");
-    let admin_response = app
-        .oneshot(admin_request)
-        .await
-        .expect("admin response");
+    let admin_response = app.oneshot(admin_request).await.expect("admin response");
     assert_eq!(admin_response.status(), StatusCode::FORBIDDEN);
 }
 
@@ -1376,7 +1363,10 @@ async fn history_pagination_returns_correct_structure() {
         .await
         .expect("body");
     let payload: Value = serde_json::from_slice(&body).expect("json");
-    assert!(payload["data"]["items"].is_array(), "items should be an array");
+    assert!(
+        payload["data"]["items"].is_array(),
+        "items should be an array"
+    );
 }
 
 #[tokio::test]

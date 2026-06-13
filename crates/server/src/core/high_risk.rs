@@ -142,10 +142,13 @@ mod tests {
         timestamp: i64,
         payload: &Value,
     ) -> String {
-        let payload_hash =
-            blake3::hash(serde_json::to_string(payload).unwrap_or_default().as_bytes())
-                .to_hex()
-                .to_string();
+        let payload_hash = blake3::hash(
+            serde_json::to_string(payload)
+                .unwrap_or_default()
+                .as_bytes(),
+        )
+        .to_hex()
+        .to_string();
         let material = format!(
             "{}|{}|{}|{}|{}|{}",
             secret, action, actor_id, nonce, timestamp, payload_hash
@@ -171,10 +174,19 @@ mod tests {
         let guard = HighRiskGuard::new_for_test(lazy_pool(), true, TEST_SECRET, 300);
         let now = Utc::now().timestamp();
         let payload = serde_json::json!({"key": "value"});
-        let sig = compute_signature(TEST_SECRET, "TEST_ACTION", "user-1", "nonce-001", now, &payload);
+        let sig = compute_signature(
+            TEST_SECRET,
+            "TEST_ACTION",
+            "user-1",
+            "nonce-001",
+            now,
+            &payload,
+        );
         let headers = signed_headers("nonce-001", now, &sig);
 
-        let result = guard.verify(&headers, "TEST_ACTION", "user-1", &payload).await;
+        let result = guard
+            .verify(&headers, "TEST_ACTION", "user-1", &payload)
+            .await;
 
         // 签名验证通过后会尝试写入 nonce 表，惰性池无真实连接时返回数据库错误
         // 只要不是签名/时间戳相关错误，就说明签名逻辑正确
@@ -280,8 +292,14 @@ mod tests {
         let payload = serde_json::json!({"key": "value"});
 
         // 使用错误的密钥计算签名
-        let wrong_sig =
-            compute_signature("wrong-secret", "TEST_ACTION", "user-1", "nonce-999", now, &payload);
+        let wrong_sig = compute_signature(
+            "wrong-secret",
+            "TEST_ACTION",
+            "user-1",
+            "nonce-999",
+            now,
+            &payload,
+        );
         let headers = signed_headers("nonce-999", now, &wrong_sig);
 
         let result = guard

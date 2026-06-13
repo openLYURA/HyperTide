@@ -190,9 +190,7 @@ pub async fn generate_key(
     {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::err(
-                "owner_id contains invalid characters",
-            )),
+            Json(ApiResponse::err("owner_id contains invalid characters")),
         );
     }
 

@@ -57,11 +57,14 @@ pub(crate) async fn execute(args: AddArgs) -> Result<()> {
     }
     if json_output_enabled() {
         let stage = load_stage().unwrap_or_else(|_| StageFile::default_for_branch(&branch));
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "ok": true,
-            "staged_count": stage.assets.len(),
-            "branch": stage.branch,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "staged_count": stage.assets.len(),
+                "branch": stage.branch,
+            }))?
+        );
     }
     Ok(())
 }

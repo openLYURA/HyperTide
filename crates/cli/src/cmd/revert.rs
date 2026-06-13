@@ -119,11 +119,14 @@ pub(crate) async fn execute(args: RevertArgs) -> Result<()> {
     }
 
     if json_output_enabled() {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "ok": true,
-            "asset_path": asset.path,
-            "restored_hash": asset.blob_hash,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "asset_path": asset.path,
+                "restored_hash": asset.blob_hash,
+            }))?
+        );
     } else {
         println!(
             "reverted {} to {} on {}@{}{}",

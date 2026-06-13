@@ -207,12 +207,10 @@ impl LockManager {
         }
 
         if let Some(repo) = &self.repo {
-            repo.delete_lock(file_path)
-                .await
-                .map_err(|e| {
-                    tracing::error!("删除锁失败: {e}");
-                    HyperTideError::Persistence("failed to delete lock".to_string())
-                })?;
+            repo.delete_lock(file_path).await.map_err(|e| {
+                tracing::error!("删除锁失败: {e}");
+                HyperTideError::Persistence("failed to delete lock".to_string())
+            })?;
         }
 
         self.locks.remove(file_path);

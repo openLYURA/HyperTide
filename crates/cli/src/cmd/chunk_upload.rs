@@ -51,12 +51,15 @@ pub(crate) async fn execute(args: ChunkUploadArgs) -> Result<()> {
         cache_blob(&blob.blob_hash, &bytes)?;
     }
     if json_output_enabled() {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "ok": true,
-            "blob_hash": blob.blob_hash,
-            "size_bytes": blob.size_bytes,
-            "manifest_only": args.manifest_only,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "blob_hash": blob.blob_hash,
+                "size_bytes": blob.size_bytes,
+                "manifest_only": args.manifest_only,
+            }))?
+        );
     } else if args.manifest_only {
         println!(
             "chunk-upload manifest-only: manifest_hash={} size_bytes={}",
