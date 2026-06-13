@@ -194,16 +194,37 @@ fn map_versioning_error(error: VersioningError) -> (StatusCode, String) {
 }
 
 fn validate_repo_and_branch(repo_id: &str, branch: &str) -> Result<(), (StatusCode, String)> {
+    const MAX_REPO_ID_LEN: usize = 128;
+    const MAX_BRANCH_LEN: usize = 256;
+
     if repo_id.trim().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             "repo_id must not be empty".to_string(),
         ));
     }
+    if repo_id.len() > MAX_REPO_ID_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "repo_id too long".to_string(),
+        ));
+    }
+    if !repo_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "repo_id contains invalid characters".to_string(),
+        ));
+    }
     if branch.trim().is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             "default_branch must not be empty".to_string(),
+        ));
+    }
+    if branch.len() > MAX_BRANCH_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "branch too long".to_string(),
         ));
     }
     Ok(())
@@ -381,6 +402,26 @@ pub async fn submit_changeset(
         Err((status, message)) => return (status, Json(ApiResponse::err(message))),
     };
     let event_meta = crate::core::events::EventMetadata::from_headers(&headers);
+
+    // 输入校验：repo_id / branch / message 长度和格式
+    const MAX_REPO_ID_LEN: usize = 128;
+    const MAX_BRANCH_LEN: usize = 256;
+    const MAX_MESSAGE_LEN: usize = 4096;
+
+    if payload.repo_id.len() > MAX_REPO_ID_LEN {
+        return (StatusCode::BAD_REQUEST, Json(ApiResponse::err("repo_id too long")));
+    }
+    if !payload.repo_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return (StatusCode::BAD_REQUEST, Json(ApiResponse::err("repo_id contains invalid characters")));
+    }
+    if let Some(ref branch) = payload.branch {
+        if branch.len() > MAX_BRANCH_LEN {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse::err("branch too long")));
+        }
+    }
+    if payload.message.len() > MAX_MESSAGE_LEN {
+        return (StatusCode::BAD_REQUEST, Json(ApiResponse::err("message too long")));
+    }
 
     let kind = match parse_kind(payload.kind.as_deref()) {
         Ok(kind) => kind,

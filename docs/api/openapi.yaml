@@ -336,6 +336,142 @@ paths:
         - BearerAuth: []
       responses:
         '200': { description: Synced }
+  /v2/sessions:
+    post:
+      tags: [Sessions]
+      summary: Create agent session
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionRequest'
+      responses:
+        '201':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/AgentSessionRecord'
+        '401': { description: Unauthorized }
+  /v2/sessions/{session_id}/save:
+    post:
+      tags: [Sessions]
+      summary: Save session progress
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: { type: string }
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCheckpointRequest'
+      responses:
+        '201':
+          description: Checkpoint saved
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/SessionCheckpointRecord'
+        '401': { description: Unauthorized }
+        '404': { description: Session not found }
+  /v2/sessions/{session_id}/checkpoints:
+    post:
+      tags: [Sessions]
+      summary: Create checkpoint
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: { type: string }
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCheckpointRequest'
+      responses:
+        '201':
+          description: Checkpoint created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/SessionCheckpointRecord'
+        '401': { description: Unauthorized }
+        '404': { description: Session not found }
+    get:
+      tags: [Sessions]
+      summary: List checkpoints
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: { type: string }
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Checkpoint list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/CheckpointPage'
+        '401': { description: Unauthorized }
+        '404': { description: Session not found }
+  /v2/checkpoints/{checkpoint_id}/snapshot:
+    get:
+      tags: [Sessions]
+      summary: Get checkpoint snapshot
+      parameters:
+        - in: path
+          name: checkpoint_id
+          required: true
+          schema: { type: string }
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Checkpoint snapshot
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/CheckpointSnapshot'
+        '401': { description: Unauthorized }
+        '404': { description: Checkpoint not found }
   /v2/trust/checkpoints/generate:
     post:
       summary: Generate trust checkpoint
@@ -476,3 +612,96 @@ components:
             details:
               nullable: true
             request_id: { type: string }
+    CreateSessionRequest:
+      type: object
+      required: [repo_id, workspace_root]
+      properties:
+        repo_id: { type: string }
+        branch: { type: string, default: main }
+        base_changeset_id: { type: string }
+        workspace_root: { type: string }
+        intent_id: { type: string }
+        task_id: { type: string }
+        agent_run_id: { type: string }
+        trigger_reason: { type: string }
+        risk_level: { type: string }
+        semantic_summary: { type: string }
+        expires_at: { type: string, format: date-time }
+    CreateCheckpointRequest:
+      type: object
+      properties:
+        trigger_reason: { type: string }
+        semantic_summary: { type: string }
+        expires_at: { type: string, format: date-time }
+        assets:
+          type: array
+          items:
+            $ref: '#/components/schemas/CheckpointAsset'
+    CheckpointAsset:
+      type: object
+      required: [asset_id, path, blob_hash]
+      properties:
+        asset_id: { type: string }
+        path: { type: string }
+        blob_hash: { type: string }
+    AgentSessionRecord:
+      type: object
+      properties:
+        session_id: { type: string }
+        repo_id: { type: string }
+        branch: { type: string }
+        base_changeset_id: { nullable: true, type: string }
+        workspace_root: { type: string }
+        actor_id: { type: string }
+        intent_id: { nullable: true, type: string }
+        task_id: { nullable: true, type: string }
+        agent_run_id: { nullable: true, type: string }
+        trigger_reason: { nullable: true, type: string }
+        risk_level: { nullable: true, type: string }
+        semantic_summary: { nullable: true, type: string }
+        expires_at: { nullable: true, type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    SessionCheckpointRecord:
+      type: object
+      properties:
+        checkpoint_id: { type: string }
+        session_id: { type: string }
+        repo_id: { type: string }
+        branch: { type: string }
+        base_changeset_id: { nullable: true, type: string }
+        parent_checkpoint_id: { nullable: true, type: string }
+        workspace_root: { type: string }
+        actor_id: { type: string }
+        trigger_reason: { type: string }
+        intent_id: { nullable: true, type: string }
+        task_id: { nullable: true, type: string }
+        agent_run_id: { nullable: true, type: string }
+        risk_level: { nullable: true, type: string }
+        semantic_summary: { nullable: true, type: string }
+        expires_at: { nullable: true, type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        assets:
+          type: array
+          items:
+            $ref: '#/components/schemas/CheckpointAsset'
+    CheckpointSnapshot:
+      type: object
+      properties:
+        checkpoint_id: { type: string }
+        session_id: { type: string }
+        repo_id: { type: string }
+        branch: { type: string }
+        base_changeset_id: { nullable: true, type: string }
+        workspace_root: { type: string }
+        actor_id: { type: string }
+        assets:
+          type: array
+          items:
+            $ref: '#/components/schemas/CheckpointAsset'
+    CheckpointPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SessionCheckpointRecord'

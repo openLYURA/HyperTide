@@ -1068,3 +1068,378 @@ async fn witness_topology_reads_structured_json_config() {
     );
     assert_eq!(payload["data"]["quorum"], Value::Number(2.into()));
 }
+
+#[tokio::test]
+async fn lock_renew_happy_path() {
+    let app = build_app(test_state(), &test_config());
+
+    // Acquire a lock first
+    let acquire_request = Request::builder()
+        .method("POST")
+        .uri("/v2/locks/acquire")
+        .header("content-type", "application/json")
+        .header("X-API-Key", test_master_key())
+        .body(Body::from(
+            r#"{"file_path":"assets/renew-test.txt"}"#,
+        ))
+        .expect("acquire request");
+    let acquire_response = app
+        .clone()
+        .oneshot(acquire_request)
+        .await
+        .expect("acquire response");
+    assert_eq!(acquire_response.status(), StatusCode::OK);
+
+    // Renew the lock
+    let renew_request = Request::builder()
+        .method("POST")
+        .uri("/v2/locks/renew")
+        .header("content-type", "application/json")
+        .header("X-API-Key", test_master_key())
+        .body(Body::from(
+            r#"{"file_path":"assets/renew-test.txt"}"#,
+        ))
+        .expect("renew request");
+    let renew_response = app.oneshot(renew_request).await.expect("renew response");
+    assert_eq!(renew_response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn create_branch_happy_path() {
+    let app = build_app(test_state(), &test_config());
+
+    // Create a repo first
+    let repo_payload = serde_json::json!({
+        "repo_id": "branch-test-repo",
+        "default_branch": "main"
+    });
+    let repo_request = Request::builder()
+        .method("POST")
+        .uri("/v2/repos")
+        .header("content-type", "application/json")
+        .header("X-API-Key", test_master_key())
+        .body(Body::from(repo_payload.to_string()))
+        .expect("repo request");
+    let repo_response = app
+        .clone()
+        .oneshot(repo_request)
+        .await
+        .expect("repo response");
+    assert_eq!(repo_response.status(), StatusCode::CREATED);
+
+    // Create a branch
+    let branch_payload = serde_json::json!({
+        "repo_id": "branch-test-repo",
+        "branch": "feature-a"
+    });
+    let branch_request = Request::builder()
+        .method("POST")
+        .uri("/v2/branches")
+        .header("content-type", "application/json")
+        .header("X-API-Key", test_master_key())
+        .body(Body::from(branch_payload.to_string()))
+        .expect("branch request");
+    let branch_response = app.oneshot(branch_request).await.expect("branch response");
+    assert_eq!(branch_response.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn lock_renew_rejects_missing_api_key() {
+    let app = build_app(test_state(), &test_config());
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v2/locks/renew")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"file_path":"assets/a.txt","owner_id":"alice"}"#,
+        ))
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn auth_generate_rejects_missing_api_key() {
+    let app = build_app(test_state(), &test_config());
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v2/auth/generate")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"owner_id":"test","permissions":["lock"]}"#,
+        ))
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn auth_revoke_rejects_missing_api_key() {
+    let app = build_app(test_state(), &test_config());
+
+    let request = Request::builder()
+        .method("DELETE")
+        .uri("/v2/auth/revoke")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"key":"some-key"}"#))
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn auth_keys_rejects_missing_api_key() {
+    let app = build_app(test_state(), &test_config());
+
+    let request = Request::builder()
+        .uri("/v2/auth/keys")
+        .body(Body::empty())
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn session_save_rejects_missing_api_key() {
+    let app = build_app(test_state(), &test_config());
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v2/sessions/fake-session-id/save")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{}"#))
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn changeset_approve_rejects_missing_api_key() {
+    let app = build_app(test_state(), &test_config());
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v2/changesets/fake-id/approve?repo_id=test-repo")
+        .header("content-type", "application/json")
+        .body(Body::empty())
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn changeset_promote_rejects_missing_api_key() {
+    let app = build_app(test_state(), &test_config());
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v2/changesets/fake-id/promote?repo_id=test-repo")
+        .header("content-type", "application/json")
+        .body(Body::empty())
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn non_owner_cannot_release_lock() {
+    let app = build_app(test_state(), &test_config());
+
+    // Acquire lock with the dev admin key
+    let acquire_request = Request::builder()
+        .method("POST")
+        .uri("/v2/locks/acquire")
+        .header("content-type", "application/json")
+        .header("X-API-Key", test_master_key())
+        .body(Body::from(
+            r#"{"file_path":"assets/owner-test.txt"}"#,
+        ))
+        .expect("acquire request");
+    let acquire_response = app
+        .clone()
+        .oneshot(acquire_request)
+        .await
+        .expect("acquire response");
+    assert_eq!(acquire_response.status(), StatusCode::OK);
+
+    // Try to release with a different owner_id
+    let release_request = Request::builder()
+        .method("POST")
+        .uri("/v2/locks/release")
+        .header("content-type", "application/json")
+        .header("X-API-Key", test_master_key())
+        .body(Body::from(
+            r#"{"file_path":"assets/owner-test.txt","owner_id":"other-user"}"#,
+        ))
+        .expect("release request");
+    let release_response = app
+        .oneshot(release_request)
+        .await
+        .expect("release response");
+    assert_eq!(release_response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn non_admin_cannot_access_admin_routes() {
+    let app = build_app(test_state(), &test_config());
+
+    // Generate a non-admin key using the admin key
+    let generate_payload = serde_json::json!({
+        "owner_id": "non-admin-user",
+        "permissions": ["lock", "download"]
+    });
+    let generate_request = Request::builder()
+        .method("POST")
+        .uri("/v2/auth/generate")
+        .header("content-type", "application/json")
+        .header("X-API-Key", test_master_key())
+        .body(Body::from(generate_payload.to_string()))
+        .expect("generate request");
+    let generate_response = app
+        .clone()
+        .oneshot(generate_request)
+        .await
+        .expect("generate response");
+    assert_eq!(generate_response.status(), StatusCode::CREATED);
+    let generate_body = to_bytes(generate_response.into_body(), usize::MAX)
+        .await
+        .expect("generate body");
+    let generate_json: Value = serde_json::from_slice(&generate_body).expect("generate json");
+    let non_admin_key = generate_json["data"]["key"]
+        .as_str()
+        .expect("key")
+        .to_string();
+
+    // Try to access admin route with non-admin key
+    let admin_request = Request::builder()
+        .method("POST")
+        .uri("/v2/auth/generate")
+        .header("content-type", "application/json")
+        .header("X-API-Key", &non_admin_key)
+        .body(Body::from(
+            r#"{"owner_id":"test","permissions":["lock"]}"#,
+        ))
+        .expect("admin request");
+    let admin_response = app
+        .oneshot(admin_request)
+        .await
+        .expect("admin response");
+    assert_eq!(admin_response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn history_pagination_returns_correct_structure() {
+    let app = build_app(test_state(), &test_config());
+
+    // Create a repo
+    let repo_payload = serde_json::json!({
+        "repo_id": "history-repo",
+        "default_branch": "main"
+    });
+    let repo_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v2/repos")
+                .header("content-type", "application/json")
+                .header("X-API-Key", test_master_key())
+                .body(Body::from(repo_payload.to_string()))
+                .expect("repo request"),
+        )
+        .await
+        .expect("repo response");
+    assert_eq!(repo_response.status(), StatusCode::CREATED);
+
+    // Query history with limit=1
+    let history_request = Request::builder()
+        .uri("/v2/history/history-repo?limit=1")
+        .header("X-API-Key", test_master_key())
+        .body(Body::empty())
+        .expect("history request");
+    let history_response = app
+        .oneshot(history_request)
+        .await
+        .expect("history response");
+    assert_eq!(history_response.status(), StatusCode::OK);
+
+    let body = to_bytes(history_response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let payload: Value = serde_json::from_slice(&body).expect("json");
+    assert!(payload["data"]["items"].is_array(), "items should be an array");
+}
+
+#[tokio::test]
+async fn history_nonexistent_repo_returns_not_found() {
+    let app = build_app(test_state(), &test_config());
+
+    let request = Request::builder()
+        .uri("/v2/history/nonexistent-repo?branch=main")
+        .header("X-API-Key", test_master_key())
+        .body(Body::empty())
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn changeset_gate_nonexistent_repo_returns_not_found() {
+    let app = build_app(test_state(), &test_config());
+
+    let request = Request::builder()
+        .uri("/v2/changesets/fake-id/gate?repo_id=nonexistent")
+        .header("X-API-Key", test_master_key())
+        .body(Body::empty())
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn upload_file_rejects_missing_api_key() {
+    let app = build_app(test_state(), &test_config());
+
+    let boundary = "----testboundary";
+    let body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test.txt\"\r\nContent-Type: text/plain\r\n\r\nhello\r\n--{boundary}--\r\n"
+    );
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v2/storage/upload")
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn blobs_missing_rejects_missing_api_key() {
+    let app = build_app(test_state(), &test_config());
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v2/blobs/missing")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"chunk_hashes":["abc","def"]}"#))
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
