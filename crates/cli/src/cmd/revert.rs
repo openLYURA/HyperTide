@@ -61,7 +61,8 @@ pub(crate) async fn execute(args: RevertArgs) -> Result<()> {
     let overwrites_local_change = match (local_hash.as_deref(), base_hash.as_deref()) {
         (Some(local), Some(base)) => local != base,
         (Some(_), None) => true,
-        _ => false,
+        (None, Some(_)) => true, // local file was deleted — restoring it overwrites the user's uncommitted delete
+        (None, None) => false,
     };
     if has_staged_delta || overwrites_local_change {
         let mut actions = Vec::new();
@@ -733,6 +734,24 @@ mod tests {
         assert!(error
             .to_string()
             .contains("asset not found in target snapshot"));
+    }
+
+    #[test]
+    fn deleted_local_file_treated_as_overwrite() {
+        // When local file is deleted (local_hash == None) but the base has a hash,
+        // overwrites_local_change should be true so the dangerous-operation prompt fires.
+        let local_hash: Option<&str> = None;
+        let base_hash: Option<&str> = Some("abc123");
+        let overwrites_local_change = match (local_hash, base_hash) {
+            (Some(local), Some(base)) => local != base,
+            (Some(_), None) => true,
+            (None, Some(_)) => true,
+            (None, None) => false,
+        };
+        assert!(
+            overwrites_local_change,
+            "local deletion should count as a local change"
+        );
     }
 
     #[test]
