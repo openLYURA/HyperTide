@@ -80,6 +80,8 @@ impl StageFile {
 pub(crate) struct AssetDelta {
     pub path: String,
     pub blob_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -633,13 +635,22 @@ pub(crate) fn detect_local_modifications(workspace: &WorkspaceState) -> Result<V
     Ok(conflicts)
 }
 
-pub(crate) fn upsert_stage_asset(stage: &mut StageFile, path: &str, blob_hash: Option<String>) {
+pub(crate) fn upsert_stage_asset(
+    stage: &mut StageFile,
+    path: &str,
+    blob_hash: Option<String>,
+    asset_id: Option<String>,
+) {
     if let Some(existing) = stage.assets.iter_mut().find(|asset| asset.path == path) {
         existing.blob_hash = blob_hash;
+        if asset_id.is_some() {
+            existing.asset_id = asset_id;
+        }
     } else {
         stage.assets.push(AssetDelta {
             path: path.to_string(),
             blob_hash,
+            asset_id,
         });
     }
 }
@@ -736,6 +747,7 @@ pub(crate) fn checkpoint_assets_to_deltas(assets: &[CheckpointAsset]) -> Vec<Ass
         .map(|asset| AssetDelta {
             path: asset.path.clone(),
             blob_hash: Some(asset.blob_hash.clone()),
+            asset_id: Some(asset.asset_id.clone()),
         })
         .collect()
 }
@@ -1702,7 +1714,7 @@ pub(crate) async fn add_file(
     if stage.branch != branch {
         stage = StageFile::default_for_branch(branch);
     }
-    upsert_stage_asset(&mut stage, &repo_path, Some(blob_hash.clone()));
+    upsert_stage_asset(&mut stage, &repo_path, Some(blob_hash.clone()), None);
     save_stage(&stage)?;
     println!(
         "staged file {} as {} on {} (blob={})",

@@ -87,66 +87,121 @@ pub(crate) async fn execute(args: RevertArgs) -> Result<()> {
         args.to_changeset_id.as_deref(),
     )
     .await?;
-    let asset = find_snapshot_asset(&snapshot, &asset_path)?.clone();
-    let bytes = fetch_blob_bytes(&client, &mut profile, &asset.blob_hash).await?;
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    fs::write(&target, &bytes).with_context(|| format!("failed to write {}", target.display()))?;
 
-    let update = apply_revert_state(
-        &mut workspace,
-        &mut stage,
-        &asset.path,
-        &asset.blob_hash,
-        base_hash.as_deref(),
-    );
+    let snapshot_asset = find_snapshot_asset(&snapshot, &asset_path);
+
+    let _update = match snapshot_asset {
+        Some(asset) => {
+            let bytes = fetch_blob_bytes(&client, &mut profile, &asset.blob_hash).await?;
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::write(&target, &bytes)
+                .with_context(|| format!("failed to write {}", target.display()))?;
+
+            let update = apply_revert_state(
+                &mut workspace,
+                &mut stage,
+                &asset_path,
+                Some(&asset.blob_hash),
+                base_hash.as_deref(),
+                asset.asset_id.clone(),
+            );
+
+            if !args.keep_lock {
+                if let Err(err) =
+                    send_lock_path_request("lock release", "release", &asset_path).await
+                {
+                    eprintln!(
+                        "warning: reverted {}, but failed to release lock: {err}",
+                        asset_path
+                    );
+                    eprintln!(
+                        "run `ht lock release --path {}` manually if needed",
+                        asset_path
+                    );
+                }
+            }
+
+            if json_output_enabled() {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "asset_path": asset_path,
+                        "restored_hash": asset.blob_hash,
+                    }))?
+                );
+            } else {
+                println!(
+                    "reverted {} to {} on {}@{}{}",
+                    asset_path,
+                    snapshot
+                        .changeset_id
+                        .as_deref()
+                        .unwrap_or(ROOT_BASE_CHANGESET_ID),
+                    repo,
+                    branch,
+                    if update.removed_staged_delta {
+                        " (removed staged delta)"
+                    } else if update.staged_delta {
+                        " (staged delta)"
+                    } else {
+                        ""
+                    }
+                );
+            }
+
+            update
+        }
+        None => {
+            // Asset not found in target snapshot — stage a deletion
+            if target.exists() {
+                fs::remove_file(&target)
+                    .with_context(|| format!("failed to delete {}", target.display()))?;
+            }
+
+            let update = apply_revert_state(
+                &mut workspace,
+                &mut stage,
+                &asset_path,
+                None,
+                base_hash.as_deref(),
+                None,
+            );
+
+            if json_output_enabled() {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "asset_path": asset_path,
+                        "restored_hash": null,
+                        "staged_deletion": true,
+                    }))?
+                );
+            } else {
+                println!(
+                    "reverted {} to absent on {}@{}{}",
+                    asset_path,
+                    repo,
+                    branch,
+                    if update.staged_delta {
+                        " (staged deletion)"
+                    } else {
+                        ""
+                    }
+                );
+            }
+
+            update
+        }
+    };
+
     workspace.last_synced_at = now_unix();
     save_workspace(&workspace)?;
     save_stage(&stage)?;
-
-    if !args.keep_lock {
-        if let Err(err) = send_lock_path_request("lock release", "release", &asset.path).await {
-            eprintln!(
-                "warning: reverted {}, but failed to release lock: {err}",
-                asset.path
-            );
-            eprintln!(
-                "run `ht lock release --path {}` manually if needed",
-                asset.path
-            );
-        }
-    }
-
-    if json_output_enabled() {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "ok": true,
-                "asset_path": asset.path,
-                "restored_hash": asset.blob_hash,
-            }))?
-        );
-    } else {
-        println!(
-            "reverted {} to {} on {}@{}{}",
-            asset.path,
-            snapshot
-                .changeset_id
-                .as_deref()
-                .unwrap_or(ROOT_BASE_CHANGESET_ID),
-            repo,
-            branch,
-            if update.removed_staged_delta {
-                " (removed staged delta)"
-            } else if update.staged_delta {
-                " (staged delta)"
-            } else {
-                ""
-            }
-        );
-    }
     Ok(())
 }
 
@@ -197,30 +252,37 @@ fn apply_revert_state(
     workspace: &mut WorkspaceState,
     stage: &mut StageFile,
     asset_path: &str,
-    blob_hash: &str,
+    blob_hash: Option<&str>,
     base_hash: Option<&str>,
+    asset_id: Option<String>,
 ) -> RevertStateUpdate {
-    if base_hash == Some(blob_hash) {
-        update_workspace_asset(workspace, asset_path, blob_hash);
+    if base_hash == blob_hash {
+        if let Some(hash) = blob_hash {
+            update_workspace_asset(workspace, asset_path, hash);
+        }
         return RevertStateUpdate {
             removed_staged_delta: remove_staged_asset(stage, asset_path),
             staged_delta: false,
         };
     }
 
-    upsert_stage_asset(stage, asset_path, Some(blob_hash.to_string()));
+    upsert_stage_asset(
+        stage,
+        asset_path,
+        blob_hash.map(|h| h.to_string()),
+        asset_id,
+    );
     RevertStateUpdate {
         removed_staged_delta: false,
         staged_delta: true,
     }
 }
 
-fn find_snapshot_asset<'a>(snapshot: &'a SyncResponse, asset_path: &str) -> Result<&'a SyncAsset> {
+fn find_snapshot_asset<'a>(snapshot: &'a SyncResponse, asset_path: &str) -> Option<&'a SyncAsset> {
     snapshot
         .assets
         .iter()
         .find(|asset| asset.path == asset_path)
-        .ok_or_else(|| anyhow!("asset not found in target snapshot: {asset_path}"))
 }
 
 #[cfg(test)]
@@ -433,10 +495,12 @@ mod tests {
                 AssetDelta {
                     path: "Content/A.uasset".to_string(),
                     blob_hash: Some("hash-a".to_string()),
+                    asset_id: None,
                 },
                 AssetDelta {
                     path: "Content/B.uasset".to_string(),
                     blob_hash: None,
+                    asset_id: None,
                 },
             ],
         };
@@ -504,8 +568,9 @@ mod tests {
             &mut workspace,
             &mut stage,
             "Content/A.uasset",
-            "old-hash",
+            Some("old-hash"),
             Some("head-hash"),
+            None,
         );
 
         assert_eq!(
@@ -540,6 +605,7 @@ mod tests {
             assets: vec![AssetDelta {
                 path: "Content/A.uasset".to_string(),
                 blob_hash: Some("local-hash".to_string()),
+                asset_id: None,
             }],
         };
 
@@ -547,8 +613,9 @@ mod tests {
             &mut workspace,
             &mut stage,
             "Content/A.uasset",
-            "head-hash",
             Some("head-hash"),
+            Some("head-hash"),
+            None,
         );
 
         assert_eq!(
@@ -694,6 +761,7 @@ mod tests {
             vec![AssetDelta {
                 path: asset_path.to_string(),
                 blob_hash: Some(StorageHash::hash_bytes(local_bytes)),
+                asset_id: None,
             }],
         );
 
@@ -729,7 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn find_snapshot_asset_errors_when_target_missing() {
+    fn find_snapshot_asset_returns_none_when_target_missing() {
         let snapshot = SyncResponse {
             repo_id: "repo".to_string(),
             branch: "main".to_string(),
@@ -741,11 +809,9 @@ mod tests {
             }],
         };
 
-        let error = find_snapshot_asset(&snapshot, "Content/A.uasset").unwrap_err();
+        let result = find_snapshot_asset(&snapshot, "Content/A.uasset");
 
-        assert!(error
-            .to_string()
-            .contains("asset not found in target snapshot"));
+        assert!(result.is_none());
     }
 
     #[test]

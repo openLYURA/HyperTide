@@ -20,7 +20,7 @@ pub(crate) async fn execute(args: RemoveArgs) -> Result<()> {
     if stage.branch != branch {
         stage = StageFile::default_for_branch(&branch);
     }
-    upsert_stage_asset(&mut stage, &args.asset_path, None);
+    upsert_stage_asset(&mut stage, &args.asset_path, None, None);
     save_stage(&stage)?;
     println!(
         "staged delete for {} on {} ({} asset(s) staged)",
