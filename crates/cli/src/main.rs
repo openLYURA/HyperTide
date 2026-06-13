@@ -55,6 +55,8 @@ enum Command {
     Log(cmd::log_cmd::LogArgs),
     #[command(about = "Submit a rollback changeset")]
     Rollback(cmd::rollback::RollbackArgs),
+    #[command(about = "Recover a single asset from a previous snapshot")]
+    Revert(cmd::revert::RevertArgs),
     #[command(about = "Sync local metadata to a branch snapshot")]
     Sync(cmd::sync::SyncArgs),
     #[command(about = "Materialize branch assets into the workspace")]
@@ -103,6 +105,7 @@ async fn main() -> Result<()> {
         Command::Submit(args) => cmd::submit::execute(args).await,
         Command::Log(args) => cmd::log_cmd::execute(args).await,
         Command::Rollback(args) => cmd::rollback::execute(args).await,
+        Command::Revert(args) => cmd::revert::execute(args).await,
         Command::Sync(args) => cmd::sync::execute(args).await,
         Command::Checkout(args) => cmd::checkout::execute(args).await,
         Command::Status(args) => cmd::status::execute(args).await,
