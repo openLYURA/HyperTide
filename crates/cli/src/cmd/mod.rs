@@ -13,6 +13,7 @@ pub(crate) mod log_cmd;
 pub(crate) mod login;
 pub(crate) mod remove;
 pub(crate) mod repo;
+pub(crate) mod revert;
 pub(crate) mod rollback;
 pub(crate) mod save;
 pub(crate) mod server;

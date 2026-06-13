@@ -87,7 +87,11 @@ pub(crate) async fn execute(args: SubmitArgs) -> Result<()> {
         return Err(anyhow!(submit_error_message(&response)));
     }
     let changeset = response.data.context("missing changeset data")?;
-    print_changeset_action("submitted", &changeset);
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&changeset)?);
+    } else {
+        print_changeset_action("submitted", &changeset);
+    }
 
     let mut updated_stage = StageFile::default_for_branch(&branch);
     updated_stage.base_changeset_id = Some(changeset.changeset_id.clone());

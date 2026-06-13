@@ -40,15 +40,25 @@ pub(crate) async fn execute(args: SyncArgs) -> Result<()> {
             save_workspace(&workspace)?;
         }
     }
-    println!(
-        "synced {}@{} to {} ({} assets)",
-        repo,
-        branch,
-        stage
-            .base_changeset_id
-            .clone()
-            .unwrap_or_else(|| "ROOT".to_string()),
-        snapshot.assets.len()
-    );
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "ok": true,
+            "repo": repo,
+            "branch": branch,
+            "changeset_id": stage.base_changeset_id,
+            "asset_count": snapshot.assets.len(),
+        }))?);
+    } else {
+        println!(
+            "synced {}@{} to {} ({} assets)",
+            repo,
+            branch,
+            stage
+                .base_changeset_id
+                .clone()
+                .unwrap_or_else(|| "ROOT".to_string()),
+            snapshot.assets.len()
+        );
+    }
     Ok(())
 }

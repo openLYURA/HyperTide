@@ -53,7 +53,8 @@ impl LockManager {
         };
 
         let existing = repo.load_locks().await.map_err(|e| {
-            HyperTideError::Persistence(format!("failed to load locks from db: {e}"))
+            tracing::error!("从数据库加载锁信息失败: {e}");
+            HyperTideError::Persistence("failed to load locks from db".to_string())
         })?;
         for lock in existing {
             manager.locks.insert(lock.file_path.clone(), lock);
@@ -93,14 +94,21 @@ impl LockManager {
             let effective_lock = repo
                 .acquire_lock_atomic(&requested_lock)
                 .await
-                .map_err(|e| HyperTideError::Persistence(format!("failed to persist lock: {e}")))?;
+                .map_err(|e| {
+                    tracing::error!("持久化锁信息失败: {e}");
+                    HyperTideError::Persistence("failed to persist lock".to_string())
+                })?;
             self.locks
                 .insert(effective_lock.file_path.clone(), effective_lock.clone());
             if effective_lock.owner_id != owner_id {
-                return Err(HyperTideError::Conflict(format!(
-                    "File is already locked by {}",
-                    effective_lock.owner_id
-                )));
+                tracing::info!(
+                    file_path = %file_path,
+                    lock_owner = %effective_lock.owner_id,
+                    "文件已被其他用户锁定"
+                );
+                return Err(HyperTideError::Conflict(
+                    "File is already locked".to_string(),
+                ));
             }
             return Ok(effective_lock);
         }
@@ -112,10 +120,14 @@ impl LockManager {
                     occupied.insert(requested_lock.clone());
                     Ok(requested_lock)
                 } else if existing.owner_id != owner_id {
-                    Err(HyperTideError::Conflict(format!(
-                        "File is already locked by {}",
-                        existing.owner_id
-                    )))
+                    tracing::info!(
+                        file_path = %file_path,
+                        lock_owner = %existing.owner_id,
+                        "文件已被其他用户锁定"
+                    );
+                    Err(HyperTideError::Conflict(
+                        "File is already locked".to_string(),
+                    ))
                 } else {
                     Ok(existing)
                 }
@@ -139,15 +151,20 @@ impl LockManager {
             .ok_or_else(|| HyperTideError::NotFound("File is not locked".to_string()))?;
 
         if existing.owner_id != owner_id {
-            return Err(HyperTideError::PermissionDenied(format!(
-                "Cannot renew: File is locked by {}",
-                existing.owner_id
-            )));
+            tracing::info!(
+                file_path = %file_path,
+                lock_owner = %existing.owner_id,
+                "尝试续期非自己持有的锁"
+            );
+            return Err(HyperTideError::PermissionDenied(
+                "Cannot renew: File is locked by another owner".to_string(),
+            ));
         }
         if self.is_expired(&existing) {
             if let Some(repo) = &self.repo {
                 repo.delete_lock(file_path).await.map_err(|e| {
-                    HyperTideError::Persistence(format!("failed to cleanup expired lock: {e}"))
+                    tracing::error!("清理过期锁失败: {e}");
+                    HyperTideError::Persistence("failed to cleanup expired lock".to_string())
                 })?;
             }
             self.locks.remove(file_path);
@@ -163,7 +180,8 @@ impl LockManager {
 
         if let Some(repo) = &self.repo {
             repo.upsert_lock(&renewed).await.map_err(|e| {
-                HyperTideError::Persistence(format!("failed to persist lock renew: {e}"))
+                tracing::error!("持久化锁续期失败: {e}");
+                HyperTideError::Persistence("failed to persist lock renew".to_string())
             })?;
         }
         self.locks.insert(file_path.to_string(), renewed.clone());
@@ -175,10 +193,14 @@ impl LockManager {
         // We need to check ownership before removing
         if let Some(existing) = self.locks.get(file_path) {
             if existing.owner_id != owner_id {
-                return Err(HyperTideError::PermissionDenied(format!(
-                    "Cannot unlock: File is locked by {}",
-                    existing.owner_id
-                )));
+                tracing::info!(
+                    file_path = %file_path,
+                    lock_owner = %existing.owner_id,
+                    "尝试解锁非自己持有的锁"
+                );
+                return Err(HyperTideError::PermissionDenied(
+                    "Cannot unlock: File is locked by another owner".to_string(),
+                ));
             }
         } else {
             return Err(HyperTideError::NotFound("File is not locked".to_string()));
@@ -187,7 +209,10 @@ impl LockManager {
         if let Some(repo) = &self.repo {
             repo.delete_lock(file_path)
                 .await
-                .map_err(|e| HyperTideError::Persistence(format!("failed to delete lock: {e}")))?;
+                .map_err(|e| {
+                    tracing::error!("删除锁失败: {e}");
+                    HyperTideError::Persistence("failed to delete lock".to_string())
+                })?;
         }
 
         self.locks.remove(file_path);
@@ -198,7 +223,8 @@ impl LockManager {
     pub async fn force_unlock(&self, file_path: &str) -> Result<bool, HyperTideError> {
         if let Some(repo) = &self.repo {
             repo.delete_lock(file_path).await.map_err(|e| {
-                HyperTideError::Persistence(format!("failed to force release lock: {e}"))
+                tracing::error!("强制释放锁失败: {e}");
+                HyperTideError::Persistence("failed to force release lock".to_string())
             })?;
         }
         Ok(self.locks.remove(file_path).is_some())

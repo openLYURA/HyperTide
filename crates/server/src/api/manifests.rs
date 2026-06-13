@@ -171,6 +171,15 @@ pub async fn create_manifest(
         );
     }
 
+    // 输入校验：chunk_size_policy 长度
+    const MAX_CHUNK_SIZE_POLICY_LEN: usize = 64;
+    if payload.chunk_size_policy.len() > MAX_CHUNK_SIZE_POLICY_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err("chunk_size_policy too long")),
+        );
+    }
+
     payload.chunks.sort_by_key(|chunk| chunk.i);
     for window in payload.chunks.windows(2) {
         if window[0].i == window[1].i {

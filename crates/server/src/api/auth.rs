@@ -175,6 +175,27 @@ pub async fn generate_key(
         return (status, Json(ApiResponse::err(message)));
     }
 
+    // 输入校验：owner_id 长度和格式
+    const MAX_OWNER_ID_LEN: usize = 256;
+    if payload.owner_id.len() > MAX_OWNER_ID_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err("owner_id too long")),
+        );
+    }
+    if !payload
+        .owner_id
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err(
+                "owner_id contains invalid characters",
+            )),
+        );
+    }
+
     let permissions: Vec<Permission> = payload
         .permissions
         .iter()

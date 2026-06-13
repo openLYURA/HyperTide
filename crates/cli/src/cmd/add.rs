@@ -34,8 +34,12 @@ pub(crate) async fn execute(args: AddArgs) -> Result<()> {
         .unwrap_or_else(|| profile.current_branch.clone());
 
     match (args.file, args.asset_path, args.blob) {
-        (Some(file), None, None) => add_file(Path::new(&file), None, &branch).await,
-        (Some(file), Some(path), None) => add_file(Path::new(&file), Some(&path), &branch).await,
+        (Some(file), None, None) => {
+            add_file(Path::new(&file), None, &branch).await?;
+        }
+        (Some(file), Some(path), None) => {
+            add_file(Path::new(&file), Some(&path), &branch).await?;
+        }
         (None, Some(path), Some(blob)) => {
             let mut stage = load_stage().unwrap_or_else(|_| StageFile::default_for_branch(&branch));
             if stage.branch != branch {
@@ -43,11 +47,21 @@ pub(crate) async fn execute(args: AddArgs) -> Result<()> {
             }
             upsert_stage_asset(&mut stage, &path, Some(blob));
             save_stage(&stage)?;
-            println!("staged {} asset(s) on {}", stage.assets.len(), stage.branch);
-            Ok(())
+            if !json_output_enabled() {
+                println!("staged {} asset(s) on {}", stage.assets.len(), stage.branch);
+            }
         }
-        _ => Err(anyhow!(
+        _ => return Err(anyhow!(
             "use either `ht add --file <local-file> [--asset-path <repo-path>]` or `ht add --blob <hash> --asset-path <repo-path>`"
         )),
     }
+    if json_output_enabled() {
+        let stage = load_stage().unwrap_or_else(|_| StageFile::default_for_branch(&branch));
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "ok": true,
+            "staged_count": stage.assets.len(),
+            "branch": stage.branch,
+        }))?);
+    }
+    Ok(())
 }

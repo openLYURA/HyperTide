@@ -315,7 +315,8 @@ impl AuthManager {
             repo.upsert_api_key(&api_key.key, owner_id, &permissions, api_key.expires_at)
                 .await
                 .map_err(|error| {
-                    HyperTideError::Persistence(format!("failed to persist api key: {error}"))
+                    tracing::error!("持久化 API 密钥失败: {error}");
+                    HyperTideError::Persistence("failed to persist api key".to_string())
                 })?;
         }
         Ok(api_key)
@@ -325,7 +326,8 @@ impl AuthManager {
         let in_memory_revoked = self.revoke_key(key);
         let db_revoked = if let Some(repo) = &self.repo {
             repo.revoke_api_key(key).await.map_err(|error| {
-                HyperTideError::Persistence(format!("failed to revoke api key: {error}"))
+                tracing::error!("撤销 API 密钥失败: {error}");
+                HyperTideError::Persistence("failed to revoke api key".to_string())
             })?
         } else {
             false
@@ -337,7 +339,8 @@ impl AuthManager {
         let mut keys = self.list_keys();
         if let Some(repo) = &self.repo {
             let stored = repo.list_api_keys().await.map_err(|error| {
-                HyperTideError::Persistence(format!("failed to list api keys: {error}"))
+                tracing::error!("列出 API 密钥失败: {error}");
+                HyperTideError::Persistence("failed to list api keys".to_string())
             })?;
             for (key_hash, row) in stored {
                 keys.push(ApiKey {
@@ -401,7 +404,8 @@ impl AuthManager {
         )
         .await
         .map_err(|error| {
-            HyperTideError::Persistence(format!("failed to persist refresh token: {error}"))
+            tracing::error!("持久化刷新令牌失败: {error}");
+            HyperTideError::Persistence("failed to persist refresh token".to_string())
         })?;
 
         Ok(TokenPair {
@@ -427,7 +431,8 @@ impl AuthManager {
             .find_refresh_token(refresh_token)
             .await
             .map_err(|error| {
-                HyperTideError::Persistence(format!("refresh lookup failed: {error}"))
+                tracing::error!("查找刷新令牌失败: {error}");
+                HyperTideError::Persistence("refresh lookup failed".to_string())
             })?
             .ok_or_else(|| HyperTideError::Authentication("Refresh token not found".to_string()))?;
 
@@ -479,12 +484,14 @@ impl AuthManager {
         )
         .await
         .map_err(|error| {
-            HyperTideError::Persistence(format!("failed to persist rotated refresh token: {error}"))
+            tracing::error!("持久化轮换刷新令牌失败: {error}");
+            HyperTideError::Persistence("failed to persist rotated refresh token".to_string())
         })?;
         repo.mark_refresh_replaced(refresh_token, &new_refresh_token)
             .await
             .map_err(|error| {
-                HyperTideError::Persistence(format!("failed to mark refresh rotation: {error}"))
+                tracing::error!("标记刷新令牌轮换失败: {error}");
+                HyperTideError::Persistence("failed to mark refresh rotation".to_string())
             })?;
 
         Ok(TokenPair {
@@ -502,7 +509,8 @@ impl AuthManager {
         repo.revoke_refresh_token(refresh_token)
             .await
             .map_err(|error| {
-                HyperTideError::Persistence(format!("failed to revoke refresh token: {error}"))
+                tracing::error!("撤销刷新令牌失败: {error}");
+                HyperTideError::Persistence("failed to revoke refresh token".to_string())
             })
     }
 

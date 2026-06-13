@@ -49,19 +49,31 @@ pub(crate) async fn execute(args: LockArgs) -> Result<()> {
 
 async fn lock_acquire(args: LockPathArgs) -> Result<()> {
     let lock = send_lock_path_request("lock acquire", "acquire", &args.path).await?;
-    print_lock("lock acquired", &lock);
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&lock)?);
+    } else {
+        print_lock("lock acquired", &lock);
+    }
     Ok(())
 }
 
 async fn lock_release(args: LockPathArgs) -> Result<()> {
     let lock = send_lock_path_request("lock release", "release", &args.path).await?;
-    print_lock("lock released", &lock);
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&lock)?);
+    } else {
+        print_lock("lock released", &lock);
+    }
     Ok(())
 }
 
 async fn lock_renew(args: LockPathArgs) -> Result<()> {
     let lock = send_lock_path_request("lock renew", "renew", &args.path).await?;
-    print_lock("lock renewed", &lock);
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&lock)?);
+    } else {
+        print_lock("lock renewed", &lock);
+    }
     Ok(())
 }
 
@@ -69,7 +81,9 @@ async fn lock_list() -> Result<()> {
     let mut profile = load_profile()?;
     let client = reqwest::Client::new();
     let locks = fetch_locks(&client, &mut profile).await?;
-    if locks.is_empty() {
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&locks)?);
+    } else if locks.is_empty() {
         println!("no active locks");
     } else {
         for lock in &locks {
@@ -115,6 +129,13 @@ async fn lock_force_release(args: LockForceReleaseArgs) -> Result<()> {
             "force-release failed"
         )));
     }
-    println!("lock force-released: {}", args.path);
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "ok": true,
+            "path": args.path,
+        }))?);
+    } else {
+        println!("lock force-released: {}", args.path);
+    }
     Ok(())
 }

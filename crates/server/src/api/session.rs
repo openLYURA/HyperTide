@@ -68,6 +68,21 @@ pub async fn create_session(
     };
     let event_meta = crate::core::events::EventMetadata::from_headers(&headers);
 
+    // 输入校验：workspace_root 长度和路径穿越检查
+    const MAX_WORKSPACE_ROOT_LEN: usize = 4096;
+    if payload.workspace_root.len() > MAX_WORKSPACE_ROOT_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err("workspace_root too long")),
+        );
+    }
+    if payload.workspace_root.contains("..") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err("path traversal not allowed")),
+        );
+    }
+
     let record = state.session_manager.create_session(CreateSessionInput {
         repo_id: payload.repo_id,
         branch: payload.branch.unwrap_or_else(|| "main".to_string()),

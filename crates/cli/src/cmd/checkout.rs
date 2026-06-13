@@ -105,12 +105,21 @@ pub(crate) async fn execute(args: CheckoutArgs) -> Result<()> {
     stage.base_changeset_id = snapshot.changeset_id;
     save_stage(&stage)?;
 
-    println!(
-        "checked out {}@{} to {} ({} assets)",
-        repo,
-        branch,
-        workspace.workspace_root,
-        workspace.checked_out_assets.len()
-    );
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "ok": true,
+            "repo": repo,
+            "branch": branch,
+            "asset_count": workspace.checked_out_assets.len(),
+        }))?);
+    } else {
+        println!(
+            "checked out {}@{} to {} ({} assets)",
+            repo,
+            branch,
+            workspace.workspace_root,
+            workspace.checked_out_assets.len()
+        );
+    }
     Ok(())
 }

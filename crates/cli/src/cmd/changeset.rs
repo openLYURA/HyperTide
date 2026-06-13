@@ -67,7 +67,11 @@ async fn changeset_approve(args: ChangesetActionArgs) -> Result<()> {
         return Err(anyhow!(api_error_message(&response, "approve failed")));
     }
     let changeset = response.data.context("missing changeset data")?;
-    print_changeset_action("approved", &changeset);
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&changeset)?);
+    } else {
+        print_changeset_action("approved", &changeset);
+    }
     let _ = actor_id;
     Ok(())
 }
@@ -109,7 +113,11 @@ async fn changeset_promote(args: ChangesetPromoteArgs) -> Result<()> {
         return Err(anyhow!(api_error_message(&response, "promote failed")));
     }
     let changeset = response.data.context("missing changeset data")?;
-    print_changeset_action("promoted", &changeset);
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&changeset)?);
+    } else {
+        print_changeset_action("promoted", &changeset);
+    }
     Ok(())
 }
 
@@ -132,13 +140,17 @@ async fn changeset_gate(args: ChangesetActionArgs) -> Result<()> {
         return Err(anyhow!(api_error_message(&response, "gate failed")));
     }
     let gate = response.data.context("missing gate data")?;
-    println!(
-        "changeset gate: {} status={} required_state={} can_promote={} blocking_reason={}",
-        gate.changeset_id,
-        gate.status,
-        gate.required_state,
-        gate.can_promote,
-        gate.blocking_reason.as_deref().unwrap_or("<none>")
-    );
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&gate)?);
+    } else {
+        println!(
+            "changeset gate: {} status={} required_state={} can_promote={} blocking_reason={}",
+            gate.changeset_id,
+            gate.status,
+            gate.required_state,
+            gate.can_promote,
+            gate.blocking_reason.as_deref().unwrap_or("<none>")
+        );
+    }
     Ok(())
 }

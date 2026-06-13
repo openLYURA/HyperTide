@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use blake3::Hasher;
-use reqwest::{multipart, RequestBuilder, StatusCode};
+use reqwest::{multipart, RequestBuilder, StatusCode, Url};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::workspace;
@@ -342,7 +342,7 @@ pub(crate) struct CheckpointAsset {
     pub blob_hash: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub(crate) struct SessionCheckpointRecord {
     pub checkpoint_id: String,
@@ -607,7 +607,7 @@ pub(crate) fn hash_bytes(bytes: &[u8]) -> String {
 }
 
 pub(crate) fn hash_local_asset(workspace_root: &Path, asset_path: &str) -> Result<Option<String>> {
-    let target = workspace_root.join(asset_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let target = resolve_workspace_target(workspace_root, asset_path)?;
     if !target.exists() {
         return Ok(None);
     }
@@ -1034,21 +1034,23 @@ pub(crate) async fn fetch_snapshot(
     branch: &str,
     to_changeset_id: Option<&str>,
 ) -> Result<SyncResponse> {
-    let mut url = format!(
-        "{}/v2/sync/{}?branch={}",
-        profile.server.trim_end_matches('/'),
-        repo,
-        branch
-    );
+    let mut url = Url::parse(profile.server.trim_end_matches('/'))
+        .with_context(|| format!("invalid server URL: {}", profile.server))?;
+    {
+        let mut path_segments = url
+            .path_segments_mut()
+            .map_err(|_| anyhow!("server URL cannot be a base URL: {}", profile.server))?;
+        path_segments.extend(["v2", "sync", repo]);
+    }
+    url.query_pairs_mut().append_pair("branch", branch);
     if let Some(to) = to_changeset_id {
-        url.push_str("&to_changeset_id=");
-        url.push_str(to);
+        url.query_pairs_mut().append_pair("to_changeset_id", to);
     }
 
     let response: ApiResponse<SyncResponse> = send_authed_api(
         client,
         profile,
-        |client, profile| with_auth(client.get(&url), profile),
+        |client, profile| with_auth(client.get(url.clone()), profile),
         "sync response decode failed",
     )
     .await?;
@@ -1704,12 +1706,14 @@ pub(crate) async fn add_file(
     }
     upsert_stage_asset(&mut stage, &repo_path, Some(blob_hash.clone()));
     save_stage(&stage)?;
-    println!(
-        "staged file {} as {} on {} (blob={})",
-        file_path.display(),
-        repo_path,
-        branch,
-        blob_hash
-    );
+    if !json_output_enabled() {
+        println!(
+            "staged file {} as {} on {} (blob={})",
+            file_path.display(),
+            repo_path,
+            branch,
+            blob_hash
+        );
+    }
     Ok(())
 }

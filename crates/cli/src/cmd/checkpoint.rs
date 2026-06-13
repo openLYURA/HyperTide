@@ -92,12 +92,21 @@ async fn checkpoint_create(args: CheckpointCreateArgs) -> Result<()> {
     save_session_state(&SessionState {
         current_session_id: Some(session_id),
     })?;
-    println!(
-        "checkpoint created: checkpoint_id={} session_id={} asset_count={}",
-        checkpoint.checkpoint_id,
-        checkpoint.session_id.as_deref().unwrap_or("<none>"),
-        checkpoint.assets.len()
-    );
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "ok": true,
+            "checkpoint_id": checkpoint.checkpoint_id,
+            "session_id": checkpoint.session_id,
+            "asset_count": checkpoint.assets.len(),
+        }))?);
+    } else {
+        println!(
+            "checkpoint created: checkpoint_id={} session_id={} asset_count={}",
+            checkpoint.checkpoint_id,
+            checkpoint.session_id.as_deref().unwrap_or("<none>"),
+            checkpoint.assets.len()
+        );
+    }
     Ok(())
 }
 
@@ -106,14 +115,25 @@ async fn checkpoint_restore(args: CheckpointRestoreArgs) -> Result<()> {
     let client = reqwest::Client::new();
     let snapshot = fetch_checkpoint_snapshot(&client, &mut profile, &args.id).await?;
     materialize_checkpoint_snapshot(&client, &mut profile, &snapshot).await?;
-    println!(
-        "checkpoint restored: checkpoint_id={} session_id={} repo_id={} branch={} asset_count={}",
-        snapshot.checkpoint_id,
-        snapshot.session_id,
-        snapshot.repo_id,
-        snapshot.branch,
-        snapshot.assets.len()
-    );
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "ok": true,
+            "checkpoint_id": snapshot.checkpoint_id,
+            "session_id": snapshot.session_id,
+            "repo_id": snapshot.repo_id,
+            "branch": snapshot.branch,
+            "asset_count": snapshot.assets.len(),
+        }))?);
+    } else {
+        println!(
+            "checkpoint restored: checkpoint_id={} session_id={} repo_id={} branch={} asset_count={}",
+            snapshot.checkpoint_id,
+            snapshot.session_id,
+            snapshot.repo_id,
+            snapshot.branch,
+            snapshot.assets.len()
+        );
+    }
     Ok(())
 }
 
@@ -148,12 +168,21 @@ async fn checkpoint_branch(args: CheckpointBranchArgs) -> Result<()> {
     let mut stage = StageFile::default_for_branch(&args.name);
     stage.base_changeset_id = snapshot.base_changeset_id.clone();
     save_stage(&stage)?;
-    println!(
-        "branched from checkpoint: checkpoint_id={} branch={} asset_count={}",
-        args.id,
-        args.name,
-        snapshot.assets.len()
-    );
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "ok": true,
+            "checkpoint_id": args.id,
+            "branch": args.name,
+            "asset_count": snapshot.assets.len(),
+        }))?);
+    } else {
+        println!(
+            "branched from checkpoint: checkpoint_id={} branch={} asset_count={}",
+            args.id,
+            args.name,
+            snapshot.assets.len()
+        );
+    }
     Ok(())
 }
 
@@ -188,15 +217,19 @@ async fn checkpoint_list(args: CheckpointListArgs) -> Result<()> {
         )));
     }
     let data = response.data.context("missing response data")?;
-    for cp in data.items {
-        println!(
-            "{}  session={} branch={} trigger={} assets={}",
-            cp.checkpoint_id,
-            cp.session_id.as_deref().unwrap_or("<none>"),
-            cp.branch.as_deref().unwrap_or("<none>"),
-            cp.trigger_reason.as_deref().unwrap_or("<none>"),
-            cp.assets.len()
-        );
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&data.items)?);
+    } else {
+        for cp in data.items {
+            println!(
+                "{}  session={} branch={} trigger={} assets={}",
+                cp.checkpoint_id,
+                cp.session_id.as_deref().unwrap_or("<none>"),
+                cp.branch.as_deref().unwrap_or("<none>"),
+                cp.trigger_reason.as_deref().unwrap_or("<none>"),
+                cp.assets.len()
+            );
+        }
     }
     Ok(())
 }

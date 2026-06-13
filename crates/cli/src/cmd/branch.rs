@@ -78,7 +78,14 @@ async fn branch_create(args: BranchCreateArgs) -> Result<()> {
             "create branch failed"
         )));
     }
-    println!("branch created: {}", args.name);
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "ok": true,
+            "branch": args.name,
+        }))?);
+    } else {
+        println!("branch created: {}", args.name);
+    }
     Ok(())
 }
 
@@ -105,14 +112,18 @@ async fn branch_list(args: BranchListArgs) -> Result<()> {
         )));
     }
     let data = response.data.context("missing response data")?;
-    for branch in data.branches {
-        println!(
-            "{}  head={}",
-            branch.name,
-            branch
-                .head_changeset_id
-                .unwrap_or_else(|| "None".to_string())
-        );
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&data.branches)?);
+    } else {
+        for branch in data.branches {
+            println!(
+                "{}  head={}",
+                branch.name,
+                branch
+                    .head_changeset_id
+                    .unwrap_or_else(|| "None".to_string())
+            );
+        }
     }
     Ok(())
 }
@@ -172,6 +183,13 @@ async fn branch_switch(args: BranchSwitchArgs) -> Result<()> {
     stage.base_changeset_id = None;
     stage.assets.clear();
     save_stage(&stage)?;
-    println!("switched to branch {}", profile.current_branch);
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "ok": true,
+            "branch": profile.current_branch,
+        }))?);
+    } else {
+        println!("switched to branch {}", profile.current_branch);
+    }
     Ok(())
 }

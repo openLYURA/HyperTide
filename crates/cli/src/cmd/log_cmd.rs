@@ -46,7 +46,9 @@ pub(crate) async fn execute(args: LogArgs) -> Result<()> {
         return Err(anyhow!(api_error_message(&response, "log failed")));
     }
     let data = response.data.context("missing response data")?;
-    if args.graph {
+    if json_output_enabled() {
+        println!("{}", serde_json::to_string_pretty(&data.items)?);
+    } else if args.graph {
         print_graph(&data.items);
     } else {
         for cs in data.items {

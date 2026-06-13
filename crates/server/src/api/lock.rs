@@ -75,6 +75,21 @@ pub async fn lock_file(
 
     let event_meta = crate::core::events::EventMetadata::from_headers(&headers);
 
+    // 输入校验：file_path 长度和路径穿越检查
+    const MAX_FILE_PATH_LEN: usize = 4096;
+    if payload.file_path.len() > MAX_FILE_PATH_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err("file_path too long")),
+        );
+    }
+    if payload.file_path.contains("..") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err("path traversal not allowed")),
+        );
+    }
+
     match state
         .lock_manager
         .try_lock(payload.file_path, owner_id)
@@ -123,6 +138,21 @@ pub async fn unlock_file(
 
     let event_meta = crate::core::events::EventMetadata::from_headers(&headers);
 
+    // 输入校验：file_path 长度和路径穿越检查
+    const MAX_FILE_PATH_LEN: usize = 4096;
+    if payload.file_path.len() > MAX_FILE_PATH_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err("file_path too long")),
+        );
+    }
+    if payload.file_path.contains("..") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err("path traversal not allowed")),
+        );
+    }
+
     match state
         .lock_manager
         .unlock(&payload.file_path, &owner_id)
@@ -170,6 +200,21 @@ pub async fn renew_lock_file(
     };
 
     let event_meta = crate::core::events::EventMetadata::from_headers(&headers);
+
+    // 输入校验：file_path 长度和路径穿越检查
+    const MAX_FILE_PATH_LEN: usize = 4096;
+    if payload.file_path.len() > MAX_FILE_PATH_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err("file_path too long")),
+        );
+    }
+    if payload.file_path.contains("..") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err("path traversal not allowed")),
+        );
+    }
 
     match state
         .lock_manager
@@ -226,6 +271,21 @@ pub async fn force_unlock_file(
     }
 
     let event_meta = crate::core::events::EventMetadata::from_headers(&headers);
+
+    // 输入校验：file_path 长度和路径穿越检查
+    const MAX_FILE_PATH_LEN: usize = 4096;
+    if payload.file_path.len() > MAX_FILE_PATH_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err("file_path too long")),
+        );
+    }
+    if payload.file_path.contains("..") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err("path traversal not allowed")),
+        );
+    }
 
     match state.lock_manager.force_unlock(&payload.file_path).await {
         Ok(true) => {
