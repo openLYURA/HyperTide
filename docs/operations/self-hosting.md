@@ -130,6 +130,10 @@ Production startup must reject unsafe configuration. These settings are required
 - `RATE_LIMIT_REQUESTS_PER_MINUTE`
 - `STORAGE_PATH`
 
+Optional capacity tuning:
+
+- `MAX_COMPOSED_BLOB_BYTES` defaults to `268435456` (256 MiB). Raise it only when the server has enough memory for in-process blob composition.
+
 Operational rules:
 
 - Terminate TLS at the reverse proxy.

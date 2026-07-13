@@ -92,7 +92,7 @@ impl LockRepoPg {
             current_lock AS (
                 SELECT file_path, owner_id, locked_at, lease_expires_at, repo_id, scope
                 FROM locks
-                WHERE file_path = $1 AND force_released = FALSE
+                WHERE repo_id = $5 AND scope = $6 AND file_path = $1 AND force_released = FALSE
             )
             SELECT file_path, owner_id, locked_at, lease_expires_at, repo_id, scope
             FROM attempted
@@ -122,13 +122,20 @@ impl LockRepoPg {
         })
     }
 
-    pub async fn delete_lock(&self, file_path: &str) -> Result<(), sqlx::Error> {
+    pub async fn delete_lock(
+        &self,
+        repo_id: &str,
+        scope: &str,
+        file_path: &str,
+    ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
             DELETE FROM locks
-            WHERE file_path = $1
+            WHERE repo_id = $1 AND scope = $2 AND file_path = $3
             "#,
         )
+        .bind(repo_id)
+        .bind(scope)
         .bind(file_path)
         .execute(&self.pool)
         .await?;

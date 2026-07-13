@@ -13,6 +13,17 @@ use crate::api::{common::ApiResponse, middleware::authz};
 use crate::core::{auth::Permission, storage::StorageManager};
 use crate::AppState;
 
+const MAX_MANIFEST_CHUNKS: usize = 4096;
+const DEFAULT_MAX_COMPOSED_BLOB_BYTES: u64 = 256 * 1024 * 1024;
+
+fn max_composed_blob_bytes() -> u64 {
+    std::env::var("MAX_COMPOSED_BLOB_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_COMPOSED_BLOB_BYTES)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ManifestChunk {
     pub i: u32,
@@ -164,6 +175,14 @@ pub async fn create_manifest(
             Json(ApiResponse::err("chunks must not be empty")),
         );
     }
+    if payload.chunks.len() > MAX_MANIFEST_CHUNKS {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ApiResponse::err(format!(
+                "manifest exceeds maximum chunk count of {MAX_MANIFEST_CHUNKS}"
+            ))),
+        );
+    }
     if payload.chunk_size_policy.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -180,12 +199,34 @@ pub async fn create_manifest(
             );
         }
     }
+    let max_composed_blob_bytes = max_composed_blob_bytes();
+    let declared_size = payload
+        .chunks
+        .iter()
+        .try_fold(0u64, |total, chunk| total.checked_add(chunk.size));
+    if declared_size.is_none_or(|size| size > max_composed_blob_bytes) {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ApiResponse::err(format!(
+                "manifest exceeds maximum composed size of {max_composed_blob_bytes} bytes"
+            ))),
+        );
+    }
 
     let chunk_hashes = payload
         .chunks
         .iter()
         .map(|chunk| chunk.chunk_hash.clone())
         .collect::<Vec<_>>();
+    if chunk_hashes
+        .iter()
+        .any(|hash| StorageManager::validate_hash(hash).is_err())
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err("manifest contains an invalid chunk hash")),
+        );
+    }
 
     let missing = if let Some(pool) = state.db_pool.as_ref() {
         match sqlx::query_scalar::<_, String>(
@@ -374,7 +415,41 @@ pub async fn compose_blob(
         Err((status, message)) => return (status, Json(ApiResponse::err(message))),
     };
 
+    if manifest.chunks.len() > MAX_MANIFEST_CHUNKS {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ApiResponse::err("manifest contains too many chunks")),
+        );
+    }
+    let max_composed_blob_bytes = max_composed_blob_bytes();
+    let declared_size = manifest
+        .chunks
+        .iter()
+        .try_fold(0u64, |total, chunk| total.checked_add(chunk.size));
+    let Some(declared_size) = declared_size.filter(|size| *size <= max_composed_blob_bytes) else {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ApiResponse::err("composed blob exceeds size limit")),
+        );
+    };
+
+    let Ok(reservation_size) = usize::try_from(declared_size) else {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ApiResponse::err(
+                "composed blob exceeds platform address space",
+            )),
+        );
+    };
     let mut composed = Vec::new();
+    if let Err(error) = composed.try_reserve(reservation_size) {
+        return (
+            StatusCode::INSUFFICIENT_STORAGE,
+            Json(ApiResponse::err(format!(
+                "failed to reserve memory for composed blob: {error}"
+            ))),
+        );
+    }
     let mut total_size: u64 = 0;
     for chunk in manifest.chunks {
         let bytes = match state.storage_manager.retrieve(&chunk.chunk_hash).await {
@@ -400,7 +475,19 @@ pub async fn compose_blob(
                 ))),
             );
         }
-        total_size += bytes.len() as u64;
+        let Some(next_size) = total_size.checked_add(bytes.len() as u64) else {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(ApiResponse::err("composed blob size overflow")),
+            );
+        };
+        if next_size > max_composed_blob_bytes {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(ApiResponse::err("composed blob exceeds size limit")),
+            );
+        }
+        total_size = next_size;
         composed.extend_from_slice(&bytes);
     }
 

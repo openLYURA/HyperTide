@@ -1,13 +1,13 @@
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, MatchedPath, State},
+    extract::{ConnectInfo, DefaultBodyLimit, MatchedPath, State},
     http::{HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
     Router,
 };
-use std::time::Instant;
+use std::{net::IpAddr, net::SocketAddr, time::Instant};
 use tower_http::{
     cors::{Any, CorsLayer},
     limit::RequestBodyLimitLayer,
@@ -62,6 +62,7 @@ pub(crate) fn build_app(state: AppState, config: &AppConfig) -> Router {
     let rate_limit_state = RateLimitState {
         limiter: rate_limiter,
         metrics: metrics.clone(),
+        auth_manager: state.auth_manager.clone(),
     };
 
     let general_routes = Router::new()
@@ -188,7 +189,27 @@ async fn enforce_rate_limit(
     request: axum::http::Request<Body>,
     next: Next,
 ) -> Response {
-    let bucket = rate_limit_bucket(&request);
+    let authorization = request
+        .headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok());
+    let bearer = authorization.and_then(|value| {
+        let (scheme, token) = value.split_once(' ').unwrap_or((value, ""));
+        scheme
+            .eq_ignore_ascii_case("bearer")
+            .then(|| token.trim().to_string())
+    });
+    let api_key = request
+        .headers()
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+    let peer_ip = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|connect_info| connect_info.0.ip());
+    let bucket = rate_limit_bucket(&rate_limit, bearer, api_key, peer_ip).await;
     if !rate_limit.limiter.allow(&bucket) {
         rate_limit.metrics.record_rate_limited();
         return (StatusCode::TOO_MANY_REQUESTS, "RATE_LIMITED").into_response();
@@ -196,40 +217,28 @@ async fn enforce_rate_limit(
     next.run(request).await
 }
 
-fn rate_limit_bucket(request: &axum::http::Request<Body>) -> String {
-    if let Some(value) = request
-        .headers()
-        .get("x-api-key")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-    {
-        return format!("api-key:{}", value);
+async fn rate_limit_bucket(
+    rate_limit: &RateLimitState,
+    bearer: Option<String>,
+    api_key: Option<String>,
+    peer_ip: Option<IpAddr>,
+) -> String {
+    if let Some(token) = bearer {
+        if let Ok(identity) = rate_limit.auth_manager.validate_access_token(&token).await {
+            return format!("principal:{}", identity.owner_id);
+        }
+        return "anonymous".to_string();
     }
-    if let Some(value) = request
-        .headers()
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-    {
-        return format!("authorization:{}", value);
+    if let Some(api_key) = api_key {
+        if let Ok(identity) = rate_limit
+            .auth_manager
+            .validate_api_key_identity(&api_key)
+            .await
+        {
+            return format!("principal:{}", identity.owner_id);
+        }
     }
-    if let Some(value) = request
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return format!("ip:{}", value);
-    }
-    if let Some(value) = request
-        .headers()
-        .get("x-real-ip")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-    {
-        return format!("ip:{}", value);
-    }
-    "global".to_string()
+    peer_ip
+        .map(|ip| format!("anonymous:{ip}"))
+        .unwrap_or_else(|| "anonymous".to_string())
 }

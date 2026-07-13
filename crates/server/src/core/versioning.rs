@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -12,6 +12,48 @@ pub mod repo_pg;
 use self::repo_pg::VersionRepoPg;
 
 pub const ROOT_BASE_CHANGESET_ID: &str = "ROOT";
+
+#[cfg(windows)]
+fn replace_state_file(temp_path: &Path, state_path: &Path) -> std::io::Result<()> {
+    use std::iter::once;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+
+    if !state_path.exists() {
+        return std::fs::rename(temp_path, state_path);
+    }
+
+    let state_wide = state_path
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect::<Vec<_>>();
+    let temp_wide = temp_path
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect::<Vec<_>>();
+    let replaced = unsafe {
+        ReplaceFileW(
+            state_wide.as_ptr(),
+            temp_wide.as_ptr(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_state_file(temp_path: &Path, state_path: &Path) -> std::io::Result<()> {
+    std::fs::rename(temp_path, state_path)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -250,6 +292,13 @@ pub enum VersioningError {
         status: ChangesetStatus,
         expected: &'static str,
     },
+    InvalidAssetLayout {
+        repo_id: String,
+        message: String,
+    },
+    Persistence {
+        message: String,
+    },
 }
 
 #[derive(Clone)]
@@ -257,6 +306,7 @@ pub struct VersionManager {
     repos: Arc<RwLock<HashMap<String, RepoState>>>,
     persistence_path: Option<PathBuf>,
     repo_pg: Option<VersionRepoPg>,
+    mutation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl VersionManager {
@@ -265,6 +315,7 @@ impl VersionManager {
             repos: Arc::new(RwLock::new(HashMap::new())),
             persistence_path: None,
             repo_pg: None,
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -286,6 +337,7 @@ impl VersionManager {
             repos: Arc::new(RwLock::new(repos)),
             persistence_path: Some(persistence_path),
             repo_pg: None,
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -298,6 +350,7 @@ impl VersionManager {
             repos: Arc::new(RwLock::new(repos)),
             persistence_path: None,
             repo_pg: Some(repo_pg),
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -307,25 +360,25 @@ impl VersionManager {
         default_branch: &str,
         created_by: &str,
     ) -> Result<RepoInfo, VersioningError> {
+        let _mutation = self.mutation_lock.lock().await;
         let (info, snapshot) = {
-            let mut repos = self.repos.write().expect("versioning lock poisoned");
-            if repos.contains_key(repo_id) {
+            let mut snapshot = self.repos.read().expect("versioning lock poisoned").clone();
+            if snapshot.contains_key(repo_id) {
                 return Err(VersioningError::RepoAlreadyExists {
                     repo_id: repo_id.to_string(),
                 });
             }
 
             let repo = RepoState::new_with_default(default_branch, created_by);
-            repos.insert(repo_id.to_string(), repo);
+            snapshot.insert(repo_id.to_string(), repo);
             let info =
-                Self::repo_info_from_state(repo_id, repos.get(repo_id).expect("repo exists"));
-            (info, repos.clone())
+                Self::repo_info_from_state(repo_id, snapshot.get(repo_id).expect("repo exists"));
+            (info, snapshot)
         };
-
-        if let Err(error) = self.persist_repo(repo_id, &snapshot).await {
-            tracing::error!("failed to persist repo state for {repo_id}: {error}");
-        }
-
+        self.persist_repo(repo_id, &snapshot)
+            .await
+            .map_err(|message| VersioningError::Persistence { message })?;
+        *self.repos.write().expect("versioning lock poisoned") = snapshot;
         Ok(info)
     }
 
@@ -356,9 +409,10 @@ impl VersionManager {
         from_changeset_id: Option<&str>,
         created_by: &str,
     ) -> Result<BranchRecord, VersioningError> {
+        let _mutation = self.mutation_lock.lock().await;
         let (record, snapshot) = {
-            let mut repos = self.repos.write().expect("versioning lock poisoned");
-            let repo = repos
+            let mut snapshot = self.repos.read().expect("versioning lock poisoned").clone();
+            let repo = snapshot
                 .entry(repo_id.to_string())
                 .or_insert_with(|| RepoState::new(created_by));
             repo.ensure_default_branch(created_by);
@@ -408,12 +462,12 @@ impl VersionManager {
                 },
             );
 
-            (record, repos.clone())
+            (record, snapshot)
         };
-        if let Err(error) = self.persist_repo(repo_id, &snapshot).await {
-            tracing::error!("failed to persist branch state for {repo_id}: {error}");
-        }
-
+        self.persist_repo(repo_id, &snapshot)
+            .await
+            .map_err(|message| VersioningError::Persistence { message })?;
+        *self.repos.write().expect("versioning lock poisoned") = snapshot;
         Ok(record)
     }
 
@@ -457,34 +511,22 @@ impl VersionManager {
         &self,
         input: SubmitChangesetInput,
     ) -> Result<ChangesetRecord, VersioningError> {
+        let _mutation = self.mutation_lock.lock().await;
         let repo_id = input.repo_id.clone();
-        let (result, snapshot) = {
-            let mut repos = self.repos.write().expect("versioning lock poisoned");
-            let repo = repos
+        let (record, snapshot) = {
+            let mut snapshot = self.repos.read().expect("versioning lock poisoned").clone();
+            let repo = snapshot
                 .entry(input.repo_id.clone())
                 .or_insert_with(|| RepoState::new(&input.author));
             repo.ensure_default_branch(&input.author);
-            let result = Self::submit_internal(repo, input);
-            let snapshot = if result.is_ok() {
-                Some(repos.clone())
-            } else {
-                None
-            };
-            (result, snapshot)
+            let record = Self::submit_internal(repo, input)?;
+            (record, snapshot)
         };
-
-        if result.is_ok() {
-            if let Some(snapshot) = snapshot {
-                if let Err(error) = self.persist_repo(&repo_id, &snapshot).await {
-                    tracing::error!("failed to persist changeset state for {repo_id}: {error}");
-                }
-            } else {
-                tracing::error!(
-                    "failed to persist changeset state for {repo_id}: missing in-memory snapshot"
-                );
-            }
-        }
-        result
+        self.persist_repo(&repo_id, &snapshot)
+            .await
+            .map_err(|message| VersioningError::Persistence { message })?;
+        *self.repos.write().expect("versioning lock poisoned") = snapshot;
+        Ok(record)
     }
 
     pub async fn approve_changeset(
@@ -493,9 +535,10 @@ impl VersionManager {
         changeset_id: &str,
         approver: &str,
     ) -> Result<ChangesetRecord, VersioningError> {
+        let _mutation = self.mutation_lock.lock().await;
         let (record, snapshot) = {
-            let mut repos = self.repos.write().expect("versioning lock poisoned");
-            let repo = repos
+            let mut snapshot = self.repos.read().expect("versioning lock poisoned").clone();
+            let repo = snapshot
                 .get_mut(repo_id)
                 .ok_or_else(|| VersioningError::RepoNotFound {
                     repo_id: repo_id.to_string(),
@@ -523,12 +566,12 @@ impl VersionManager {
                 }
             }
 
-            (record.clone(), repos.clone())
+            (record.clone(), snapshot)
         };
-
-        if let Err(error) = self.persist_repo(repo_id, &snapshot).await {
-            tracing::error!("failed to persist approve state for {repo_id}: {error}");
-        }
+        self.persist_repo(repo_id, &snapshot)
+            .await
+            .map_err(|message| VersioningError::Persistence { message })?;
+        *self.repos.write().expect("versioning lock poisoned") = snapshot;
         Ok(record)
     }
 
@@ -538,9 +581,10 @@ impl VersionManager {
         changeset_id: &str,
         promoter: &str,
     ) -> Result<ChangesetRecord, VersioningError> {
+        let _mutation = self.mutation_lock.lock().await;
         let (record, snapshot) = {
-            let mut repos = self.repos.write().expect("versioning lock poisoned");
-            let repo = repos
+            let mut snapshot = self.repos.read().expect("versioning lock poisoned").clone();
+            let repo = snapshot
                 .get_mut(repo_id)
                 .ok_or_else(|| VersioningError::RepoNotFound {
                     repo_id: repo_id.to_string(),
@@ -599,12 +643,12 @@ impl VersionManager {
             record.promoted_at = Some(Utc::now());
             record.visible_ref = Some(visible_ref(&record.branch));
 
-            (record.clone(), repos.clone())
+            (record.clone(), snapshot)
         };
-
-        if let Err(error) = self.persist_repo(repo_id, &snapshot).await {
-            tracing::error!("failed to persist promote state for {repo_id}: {error}");
-        }
+        self.persist_repo(repo_id, &snapshot)
+            .await
+            .map_err(|message| VersioningError::Persistence { message })?;
+        *self.repos.write().expect("versioning lock poisoned") = snapshot;
         Ok(record)
     }
 
@@ -949,6 +993,7 @@ impl VersionManager {
             }
             normalized_assets.push(asset);
         }
+        Self::validate_snapshot_layout(&repo_id, &new_snapshot)?;
 
         let changeset_id = Uuid::new_v4().to_string();
         let status = match visibility {
@@ -1002,6 +1047,37 @@ impl VersionManager {
         Ok(record)
     }
 
+    fn validate_snapshot_layout(
+        repo_id: &str,
+        snapshot: &HashMap<String, SnapshotAsset>,
+    ) -> Result<(), VersioningError> {
+        let mut paths = HashSet::with_capacity(snapshot.len());
+        for asset in snapshot.values() {
+            let normalized = asset.path.replace('\\', "/");
+            if !paths.insert(normalized.clone()) {
+                return Err(VersioningError::InvalidAssetLayout {
+                    repo_id: repo_id.to_string(),
+                    message: format!("duplicate asset path: {}", asset.path),
+                });
+            }
+        }
+        for path in &paths {
+            for (index, byte) in path.bytes().enumerate() {
+                if byte == b'/' && paths.contains(&path[..index]) {
+                    return Err(VersioningError::InvalidAssetLayout {
+                        repo_id: repo_id.to_string(),
+                        message: format!(
+                            "asset path conflicts with parent asset: {} and {}",
+                            &path[..index],
+                            path
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn load_repos(path: &Path) -> Result<HashMap<String, RepoState>, String> {
         if !path.exists() {
             return Ok(HashMap::new());
@@ -1028,52 +1104,46 @@ impl VersionManager {
             return Ok(());
         }
 
-        self.persist_repos_file(repos);
-        Ok(())
+        self.persist_repos_file(repos)
     }
 
-    fn persist_repos_file(&self, repos: &HashMap<String, RepoState>) {
+    fn persist_repos_file(&self, repos: &HashMap<String, RepoState>) -> Result<(), String> {
         let Some(path) = self.persistence_path.as_ref() else {
-            return;
+            return Ok(());
         };
 
         if let Some(parent) = path.parent() {
             if let Err(error) = std::fs::create_dir_all(parent) {
-                tracing::error!(
+                return Err(format!(
                     "failed to create versioning state dir {}: {}",
                     parent.display(),
                     error
-                );
-                return;
+                ));
             }
         }
 
         let payload = match serde_json::to_vec_pretty(repos) {
             Ok(payload) => payload,
-            Err(error) => {
-                tracing::error!("failed to serialize versioning state: {}", error);
-                return;
-            }
+            Err(error) => return Err(format!("failed to serialize versioning state: {error}")),
         };
 
         let temp_path = path.with_extension("tmp");
         if let Err(error) = std::fs::write(&temp_path, payload) {
-            tracing::error!(
+            return Err(format!(
                 "failed to write versioning temp state {}: {}",
                 temp_path.display(),
                 error
-            );
-            return;
+            ));
         }
 
-        if let Err(error) = std::fs::rename(&temp_path, path) {
-            let _ = std::fs::remove_file(&temp_path);
-            tracing::error!(
+        if let Err(error) = replace_state_file(&temp_path, path) {
+            return Err(format!(
                 "failed to atomically replace versioning state {}: {}",
                 path.display(),
                 error
-            );
+            ));
         }
+        Ok(())
     }
 }
 
@@ -1220,6 +1290,48 @@ mod tests {
         assert_eq!(sync.changeset_id, Some(c2.changeset_id));
         assert_eq!(sync.assets.len(), 1);
         assert_eq!(sync.assets[0].blob_hash, "hash-2");
+    }
+
+    #[tokio::test]
+    async fn submit_rejects_conflicting_snapshot_paths() {
+        let manager = VersionManager::new();
+        let error = manager
+            .submit_changeset(SubmitChangesetInput {
+                repo_id: "repo-layout".to_string(),
+                branch: "main".to_string(),
+                base_changeset_id: Some(ROOT_BASE_CHANGESET_ID.to_string()),
+                kind: ChangesetKind::Normal,
+                rollback_of: None,
+                author: "alice".to_string(),
+                message: "invalid layout".to_string(),
+                visibility: ChangesetVisibility::Visible,
+                intent_id: None,
+                task_id: None,
+                agent_run_id: None,
+                session_id: None,
+                parent_checkpoint_id: None,
+                risk_level: None,
+                semantic_summary: None,
+                assets: vec![
+                    AssetDelta {
+                        asset_id: Some("asset-parent".to_string()),
+                        path: "Content".to_string(),
+                        from_blob_hash: None,
+                        blob_hash: Some("hash-parent".to_string()),
+                    },
+                    AssetDelta {
+                        asset_id: Some("asset-child".to_string()),
+                        path: "Content/A.uasset".to_string(),
+                        from_blob_hash: None,
+                        blob_hash: Some("hash-child".to_string()),
+                    },
+                ],
+            })
+            .await
+            .expect_err("conflicting paths must be rejected");
+
+        assert!(matches!(error, VersioningError::InvalidAssetLayout { .. }));
+        assert!(manager.list_repos().is_empty());
     }
 
     #[tokio::test]
@@ -1635,6 +1747,48 @@ mod tests {
         assert_eq!(snapshot.assets.len(), 1);
         assert_eq!(snapshot.assets[0].path, "env/config.json");
         assert_eq!(snapshot.assets[0].blob_hash, "blob-v1");
+
+        let _ = std::fs::remove_file(state_file);
+    }
+
+    #[tokio::test]
+    async fn persistence_failure_does_not_publish_in_memory_state() {
+        let blocker =
+            std::env::temp_dir().join(format!("hypertide-versioning-blocker-{}", Uuid::new_v4()));
+        std::fs::write(&blocker, b"not-a-directory").expect("create blocker");
+        let manager = VersionManager::with_persistence(blocker.join("state.json"));
+
+        let error = manager
+            .create_repo("repo-not-persisted", "main", "alice")
+            .await
+            .expect_err("persistence must fail");
+
+        assert!(matches!(error, VersioningError::Persistence { .. }));
+        assert!(manager.list_repos().is_empty());
+        let _ = std::fs::remove_file(blocker);
+    }
+
+    #[tokio::test]
+    async fn file_persistence_supports_consecutive_mutations() {
+        let state_file =
+            std::env::temp_dir().join(format!("hypertide-versioning-{}.json", Uuid::new_v4()));
+        let manager = VersionManager::with_persistence(&state_file);
+
+        manager
+            .create_repo("repo-p", "main", "alice")
+            .await
+            .expect("first persistence write");
+        manager
+            .create_branch("repo-p", "feature", None, "alice")
+            .await
+            .expect("replacement persistence write");
+
+        let reloaded = VersionManager::with_persistence(&state_file);
+        let branches = reloaded
+            .list_branches("repo-p")
+            .expect("load persisted repo");
+        assert_eq!(branches.len(), 2);
+        assert!(branches.iter().any(|branch| branch.name == "feature"));
 
         let _ = std::fs::remove_file(state_file);
     }

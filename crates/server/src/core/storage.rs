@@ -22,6 +22,21 @@ pub struct StorageManager {
 }
 
 impl StorageManager {
+    pub(crate) fn validate_hash(hash: &str) -> Result<(), HyperTideError> {
+        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(HyperTideError::Validation(
+                "Invalid BLAKE3 hash: expected 64 hexadecimal characters".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn object_path(&self, hash: &str) -> Result<PathBuf, HyperTideError> {
+        Self::validate_hash(hash)?;
+        let (prefix, rest) = hash.split_at(2);
+        Ok(self.storage_root.join("objects").join(prefix).join(rest))
+    }
+
     async fn check_path_exists(path: &Path, context: &str) -> Result<bool, String> {
         fs::try_exists(path)
             .await
@@ -107,12 +122,22 @@ impl StorageManager {
             .await
             .map_err(HyperTideError::Persistence)?
         {
-            return Ok(StoredFile {
-                hash,
-                original_path: original_path.to_string(),
-                size_bytes,
-                stored_at: chrono::Utc::now(),
-            });
+            let existing = fs::read(&object_path).await.map_err(|error| {
+                HyperTideError::Persistence(format!("Failed to verify existing object: {error}"))
+            })?;
+            if Self::calculate_hash(&existing) == hash {
+                return Ok(StoredFile {
+                    hash,
+                    original_path: original_path.to_string(),
+                    size_bytes,
+                    stored_at: chrono::Utc::now(),
+                });
+            }
+            fs::remove_file(&object_path).await.map_err(|error| {
+                HyperTideError::Persistence(format!(
+                    "Failed to replace corrupt CAS object {hash}: {error}"
+                ))
+            })?;
         }
 
         // Create subdirectory if needed
@@ -166,12 +191,7 @@ impl StorageManager {
 
     /// Retrieve file content by hash
     pub async fn retrieve(&self, hash: &str) -> Result<Vec<u8>, HyperTideError> {
-        if hash.len() < 3 {
-            return Err(HyperTideError::Validation("Invalid hash".to_string()));
-        }
-
-        let (prefix, rest) = hash.split_at(2);
-        let object_path = self.storage_root.join("objects").join(prefix).join(rest);
+        let object_path = self.object_path(hash)?;
 
         if !Self::check_path_exists(&object_path, "object existence before retrieve")
             .await
@@ -183,30 +203,27 @@ impl StorageManager {
             )));
         }
 
-        fs::read(&object_path)
+        let bytes = fs::read(&object_path)
             .await
-            .map_err(|e| HyperTideError::Persistence(format!("Failed to read object: {}", e)))
+            .map_err(|e| HyperTideError::Persistence(format!("Failed to read object: {}", e)))?;
+        let actual_hash = Self::calculate_hash(&bytes);
+        if actual_hash != hash {
+            return Err(HyperTideError::Persistence(format!(
+                "CAS object integrity mismatch: expected {hash}, got {actual_hash}"
+            )));
+        }
+        Ok(bytes)
     }
 
     /// Check if a file with given hash exists
     pub async fn exists(&self, hash: &str) -> Result<bool, String> {
-        if hash.len() < 3 {
-            return Ok(false);
-        }
-
-        let (prefix, rest) = hash.split_at(2);
-        let object_path = self.storage_root.join("objects").join(prefix).join(rest);
+        let object_path = self.object_path(hash).map_err(|error| error.to_string())?;
         Self::check_path_exists(&object_path, "object existence").await
     }
 
     /// Get the local file path for a hash (for direct access)
     pub fn get_path(&self, hash: &str) -> Option<PathBuf> {
-        if hash.len() < 3 {
-            return None;
-        }
-
-        let (prefix, rest) = hash.split_at(2);
-        Some(self.storage_root.join("objects").join(prefix).join(rest))
+        self.object_path(hash).ok()
     }
 }
 
@@ -367,6 +384,43 @@ mod tests {
         }
 
         std::fs::remove_file(object_dir).ok();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn rejects_non_blake3_hashes_before_resolving_storage_paths() {
+        let root = make_storage_root("invalid-hash");
+        let manager = StorageManager::new(&root);
+        manager.init().await.expect("init storage");
+
+        let traversal = manager
+            .retrieve("../outside-file")
+            .await
+            .expect_err("path traversal must be rejected");
+        assert!(traversal.to_string().contains("Invalid BLAKE3 hash"));
+        assert!(manager.exists("../outside-file").await.is_err());
+        assert!(manager.get_path("../outside-file").is_none());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn retrieve_rejects_corrupt_content_under_a_valid_hash() {
+        let root = make_storage_root("corrupt-object");
+        let manager = StorageManager::new(&root);
+        manager.init().await.expect("init storage");
+        let expected_hash = StorageManager::calculate_hash(b"expected");
+        let object_path = manager.get_path(&expected_hash).expect("valid object path");
+        std::fs::create_dir_all(object_path.parent().expect("object parent"))
+            .expect("create object parent");
+        std::fs::write(&object_path, b"corrupt").expect("write corrupt object");
+
+        let error = manager
+            .retrieve(&expected_hash)
+            .await
+            .expect_err("corrupt object must be rejected");
+        assert!(error.to_string().contains("integrity mismatch"));
+
         std::fs::remove_dir_all(root).ok();
     }
 }

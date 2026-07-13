@@ -66,6 +66,15 @@ pub async fn missing_chunks(
     let mut unique_hashes = payload.chunk_hashes.clone();
     unique_hashes.sort();
     unique_hashes.dedup();
+    if unique_hashes
+        .iter()
+        .any(|hash| StorageManager::validate_hash(hash).is_err())
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err("invalid chunk hash")),
+        );
+    }
 
     let missing = if let Some(pool) = state.db_pool.as_ref() {
         match sqlx::query_scalar::<_, String>(

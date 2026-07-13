@@ -10,13 +10,14 @@ use crate::routes::{build_app, DEFAULT_BODY_LIMIT_BYTES};
 use crate::state::{AppState, HttpMetrics, RateLimiter};
 use axum::{
     body::{to_bytes, Body},
+    extract::ConnectInfo,
     http::{HeaderValue, Request, StatusCode},
 };
 use serde_json::Value;
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{net::SocketAddr, path::PathBuf};
 use tower::util::ServiceExt;
 
 fn test_master_key() -> &'static str {
@@ -117,7 +118,7 @@ fn test_pg_pool() -> PgPool {
 }
 
 #[tokio::test]
-async fn exists_route_returns_json_response() {
+async fn exists_route_rejects_invalid_hashes() {
     let app = build_app(test_state(), &test_config());
 
     let request = Request::builder()
@@ -127,13 +128,32 @@ async fn exists_route_returns_json_response() {
         .expect("request");
 
     let response = app.oneshot(request).await.expect("response");
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
     let payload: Value = serde_json::from_slice(&body).expect("json");
-    assert_eq!(payload["success"], Value::Bool(true));
+    assert_eq!(payload["success"], Value::Bool(false));
+}
+
+#[tokio::test]
+async fn exists_route_returns_false_for_valid_missing_hash() {
+    let app = build_app(test_state(), &test_config());
+    let hash = "0".repeat(64);
+    let request = Request::builder()
+        .uri(format!("/v2/storage/exists/{hash}"))
+        .header("X-API-Key", test_master_key())
+        .body(Body::empty())
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let payload: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(payload["data"], Value::Bool(false));
 }
 
 #[tokio::test]
@@ -180,7 +200,9 @@ async fn lock_route_uses_authenticated_owner_when_owner_not_provided() {
         .uri("/v2/locks/acquire")
         .header("content-type", "application/json")
         .header("X-API-Key", test_master_key())
-        .body(Body::from(r#"{"file_path":"assets/no-owner.txt"}"#))
+        .body(Body::from(
+            r#"{"file_path":"assets/no-owner.txt","repo_id":"repo-a"}"#,
+        ))
         .expect("request");
 
     let response = app.oneshot(request).await.expect("response");
@@ -416,32 +438,187 @@ async fn rate_limit_returns_429_when_window_is_exhausted() {
 }
 
 #[tokio::test]
-async fn rate_limit_is_bucketed_by_api_key() {
+async fn invalid_credentials_share_the_anonymous_rate_limit_bucket() {
     let app = build_app(test_state(), &test_config_with_rate_limit(1));
 
-    let first = Request::builder()
+    let mut first = Request::builder()
         .uri("/health/live")
         .header("X-API-Key", "key-a")
         .body(Body::empty())
         .expect("first request");
+    first.extensions_mut().insert(ConnectInfo(
+        "192.0.2.1:4000".parse::<SocketAddr>().expect("peer"),
+    ));
     let first_response = app.clone().oneshot(first).await.expect("first response");
     assert_eq!(first_response.status(), StatusCode::OK);
 
-    let second = Request::builder()
-        .uri("/health/live")
-        .header("X-API-Key", "key-a")
-        .body(Body::empty())
-        .expect("second request");
-    let second_response = app.clone().oneshot(second).await.expect("second response");
-    assert_eq!(second_response.status(), StatusCode::TOO_MANY_REQUESTS);
-
-    let other_key = Request::builder()
+    let mut second = Request::builder()
         .uri("/health/live")
         .header("X-API-Key", "key-b")
         .body(Body::empty())
-        .expect("other key request");
-    let other_key_response = app.oneshot(other_key).await.expect("other key response");
-    assert_eq!(other_key_response.status(), StatusCode::OK);
+        .expect("second request");
+    second.extensions_mut().insert(ConnectInfo(
+        "192.0.2.1:5000".parse::<SocketAddr>().expect("peer"),
+    ));
+    let second_response = app.clone().oneshot(second).await.expect("second response");
+    assert_eq!(second_response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let mut other_peer = Request::builder()
+        .uri("/health/live")
+        .header("X-API-Key", "key-c")
+        .body(Body::empty())
+        .expect("other peer request");
+    other_peer.extensions_mut().insert(ConnectInfo(
+        "192.0.2.2:4000".parse::<SocketAddr>().expect("peer"),
+    ));
+    let other_peer_response = app
+        .clone()
+        .oneshot(other_peer)
+        .await
+        .expect("other peer response");
+    assert_eq!(other_peer_response.status(), StatusCode::OK);
+
+    let authenticated = Request::builder()
+        .uri("/health/live")
+        .header("X-API-Key", test_master_key())
+        .body(Body::empty())
+        .expect("authenticated request");
+    let authenticated_response = app
+        .oneshot(authenticated)
+        .await
+        .expect("authenticated response");
+    assert_eq!(authenticated_response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn manifest_rejects_composed_blobs_over_the_memory_limit() {
+    let app = build_app(test_state(), &test_config());
+    let payload = serde_json::json!({
+        "version": 1,
+        "chunk_size_policy": "fixed",
+        "chunks": [{
+            "i": 0,
+            "chunk_hash": "0".repeat(64),
+            "size": 268_435_457u64
+        }],
+        "file_meta": null
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v2/manifests")
+        .header("content-type", "application/json")
+        .header("X-API-Key", test_master_key())
+        .body(Body::from(payload.to_string()))
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn lock_release_returns_the_released_scoped_lock() {
+    let app = build_app(test_state(), &test_config());
+    let payload = serde_json::json!({
+        "file_path": "assets/scoped.txt",
+        "repo_id": "repo-a",
+        "scope": "asset"
+    });
+    let acquire = Request::builder()
+        .method("POST")
+        .uri("/v2/locks/acquire")
+        .header("content-type", "application/json")
+        .header("X-API-Key", test_master_key())
+        .body(Body::from(payload.to_string()))
+        .expect("acquire request");
+    assert_eq!(
+        app.clone()
+            .oneshot(acquire)
+            .await
+            .expect("acquire")
+            .status(),
+        StatusCode::OK
+    );
+
+    let release = Request::builder()
+        .method("POST")
+        .uri("/v2/locks/release")
+        .header("content-type", "application/json")
+        .header("X-API-Key", test_master_key())
+        .body(Body::from(payload.to_string()))
+        .expect("release request");
+    let response = app.oneshot(release).await.expect("release");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["data"]["repo_id"], "repo-a");
+    assert_eq!(json["data"]["file_path"], "assets/scoped.txt");
+}
+
+#[tokio::test]
+async fn lock_list_is_scoped_to_the_requested_repo() {
+    let app = build_app(test_state(), &test_config());
+    for repo_id in ["repo-a", "repo-b"] {
+        let payload = serde_json::json!({
+            "file_path": "assets/shared.txt",
+            "repo_id": repo_id,
+            "scope": "asset"
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v2/locks/acquire")
+            .header("content-type", "application/json")
+            .header("X-API-Key", test_master_key())
+            .body(Body::from(payload.to_string()))
+            .expect("acquire request");
+        assert_eq!(
+            app.clone()
+                .oneshot(request)
+                .await
+                .expect("response")
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    let request = Request::builder()
+        .uri("/v2/locks?repo_id=repo-a&scope=asset")
+        .header("X-API-Key", test_master_key())
+        .body(Body::empty())
+        .expect("list request");
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: Value = serde_json::from_slice(&body).expect("json");
+    let locks = json["data"].as_array().expect("locks array");
+    assert_eq!(locks.len(), 1);
+    assert_eq!(locks[0]["repo_id"], "repo-a");
+}
+
+#[tokio::test]
+async fn submit_rejects_asset_paths_that_escape_the_workspace() {
+    let app = build_app(test_state(), &test_config());
+    let payload = serde_json::json!({
+        "repo_id": "repo-path-safety",
+        "branch": "main",
+        "base_changeset_id": "ROOT",
+        "author": "dev-admin",
+        "message": "invalid path",
+        "assets": [{ "path": "../../outside.txt", "blob_hash": null }]
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v2/changesets")
+        .header("content-type", "application/json")
+        .header("X-API-Key", test_master_key())
+        .body(Body::from(payload.to_string()))
+        .expect("request");
+
+    let response = app.oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

@@ -88,6 +88,8 @@ pub(crate) struct AssetDelta {
 pub(crate) struct WorkspaceFile {
     pub path: String,
     pub blob_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,11 +113,21 @@ pub(crate) struct FileLockInfo {
     pub owner_id: String,
     pub locked_at: String,
     pub lease_expires_at: Option<String>,
+    #[serde(default)]
+    pub repo_id: String,
+    #[serde(default = "default_lock_scope")]
+    pub scope: String,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct LockRequest<'a> {
     pub file_path: &'a str,
+    pub repo_id: &'a str,
+    pub scope: &'a str,
+}
+
+fn default_lock_scope() -> String {
+    "asset".to_string()
 }
 
 #[derive(Debug, Serialize)]
@@ -458,7 +470,7 @@ pub(crate) struct AssetRow {
 pub(crate) struct ConflictEntry {
     pub path: String,
     pub base_hash: String,
-    pub local_hash: String,
+    pub local_hash: Option<String>,
 }
 
 pub(crate) struct StorageHash;
@@ -564,6 +576,7 @@ pub(crate) fn ensure_state_dir() -> Result<()> {
 }
 
 pub(crate) fn cache_object_path(hash: &str) -> Result<PathBuf> {
+    validate_blake3_hash(hash)?;
     let paths = state_paths()?;
     Ok(workspace::cache_object_path(&paths, hash))
 }
@@ -609,7 +622,7 @@ pub(crate) fn hash_bytes(bytes: &[u8]) -> String {
 }
 
 pub(crate) fn hash_local_asset(workspace_root: &Path, asset_path: &str) -> Result<Option<String>> {
-    let target = workspace_root.join(asset_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let target = resolve_workspace_target(workspace_root, asset_path)?;
     if !target.exists() {
         return Ok(None);
     }
@@ -622,14 +635,13 @@ pub(crate) fn detect_local_modifications(workspace: &WorkspaceState) -> Result<V
     let workspace_root = Path::new(&workspace.workspace_root);
     let mut conflicts = Vec::new();
     for asset in &workspace.checked_out_assets {
-        if let Some(local_hash) = hash_local_asset(workspace_root, &asset.path)? {
-            if local_hash != asset.blob_hash {
-                conflicts.push(ConflictEntry {
-                    path: asset.path.clone(),
-                    base_hash: asset.blob_hash.clone(),
-                    local_hash,
-                });
-            }
+        let local_hash = hash_local_asset(workspace_root, &asset.path)?;
+        if local_hash.as_deref() != Some(asset.blob_hash.as_str()) {
+            conflicts.push(ConflictEntry {
+                path: asset.path.clone(),
+                base_hash: asset.blob_hash.clone(),
+                local_hash,
+            });
         }
     }
     Ok(conflicts)
@@ -732,7 +744,7 @@ pub(crate) fn collect_workspace_checkpoint_assets(
             let bytes = fs::read(&target)
                 .with_context(|| format!("failed to read {}", target.display()))?;
             Ok(CheckpointAsset {
-                asset_id: asset.path.clone(),
+                asset_id: asset.asset_id.clone().unwrap_or_else(|| asset.path.clone()),
                 path: asset.path.clone(),
                 blob_hash: hash_bytes(&bytes),
             })
@@ -755,7 +767,11 @@ pub(crate) fn checkpoint_assets_to_deltas(assets: &[CheckpointAsset]) -> Vec<Ass
 pub(crate) fn resolve_workspace_target(workspace_root: &Path, asset_path: &str) -> Result<PathBuf> {
     let normalized = asset_path.replace('/', std::path::MAIN_SEPARATOR_STR);
     let candidate = PathBuf::from(&normalized);
-    if candidate.is_absolute() {
+    let raw = asset_path.replace('\\', "/");
+    let bytes = raw.as_bytes();
+    let has_windows_drive_prefix =
+        bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if candidate.is_absolute() || has_windows_drive_prefix {
         return Err(anyhow!(
             "checkpoint asset path must be relative: {asset_path}"
         ));
@@ -774,7 +790,37 @@ pub(crate) fn resolve_workspace_target(workspace_root: &Path, asset_path: &str) 
             "checkpoint asset path escapes workspace: {asset_path}"
         ));
     }
+    let mut current = workspace_root.to_path_buf();
+    for component in target
+        .strip_prefix(workspace_root)
+        .with_context(|| format!("asset path escapes workspace: {asset_path}"))?
+        .components()
+    {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(anyhow!(
+                    "asset path traverses a symbolic link: {asset_path}"
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect {}", current.display()));
+            }
+        }
+    }
     Ok(target)
+}
+
+pub(crate) fn validate_blake3_hash(hash: &str) -> Result<()> {
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(anyhow!(
+            "invalid BLAKE3 hash: expected 64 hexadecimal characters"
+        ));
+    }
+    Ok(())
 }
 
 // ── Print helpers ──
@@ -793,9 +839,15 @@ pub(crate) fn print_changeset_action(action: &str, changeset: &ChangesetRecord) 
 
 pub(crate) fn print_lock(label: &str, lock: &FileLockInfo) {
     println!(
-        "{}: {} owner={} locked_at={} lease_expires_at={}",
+        "{}: {} repo={} scope={} owner={} locked_at={} lease_expires_at={}",
         label,
         lock.file_path,
+        if lock.repo_id.is_empty() {
+            "<default>"
+        } else {
+            &lock.repo_id
+        },
+        lock.scope,
         lock.owner_id,
         lock.locked_at,
         lock.lease_expires_at.as_deref().unwrap_or("<none>")
@@ -1140,8 +1192,17 @@ pub(crate) async fn fetch_blob_bytes(
 ) -> Result<Vec<u8>> {
     let cache_path = cache_object_path(blob_hash)?;
     if cache_path.exists() {
-        return fs::read(&cache_path)
-            .with_context(|| format!("failed to read cached object {}", cache_path.display()));
+        let bytes = fs::read(&cache_path)
+            .with_context(|| format!("failed to read cached object {}", cache_path.display()))?;
+        let actual = StorageHash::hash_bytes(&bytes);
+        if actual != blob_hash {
+            return Err(anyhow!(
+                "cached object hash mismatch for {}: got {}",
+                blob_hash,
+                actual
+            ));
+        }
+        return Ok(bytes);
     }
 
     ensure_access_token(client, profile).await?;
@@ -1159,6 +1220,14 @@ pub(crate) async fn fetch_blob_bytes(
         ));
     }
     let bytes = response.bytes().await?.to_vec();
+    let actual = StorageHash::hash_bytes(&bytes);
+    if actual != blob_hash {
+        return Err(anyhow!(
+            "downloaded object hash mismatch for {}: got {}",
+            blob_hash,
+            actual
+        ));
+    }
     cache_blob(blob_hash, &bytes)?;
     Ok(bytes)
 }
@@ -1166,12 +1235,20 @@ pub(crate) async fn fetch_blob_bytes(
 pub(crate) async fn fetch_locks(
     client: &reqwest::Client,
     profile: &mut CliProfile,
+    repo_id: &str,
 ) -> Result<Vec<FileLockInfo>> {
     let url = format!("{}/v2/locks", profile.server.trim_end_matches('/'));
     let response: ApiResponse<Vec<FileLockInfo>> = send_authed_api(
         client,
         profile,
-        |client, profile| with_auth(client.get(&url), profile),
+        |client, profile| {
+            with_auth(
+                client
+                    .get(&url)
+                    .query(&[("repo_id", repo_id), ("scope", "asset")]),
+                profile,
+            )
+        },
         "locks response decode failed",
     )
     .await?;
@@ -1584,7 +1661,7 @@ pub(crate) async fn collect_checkpoint_assets(
             .into_iter()
             .filter_map(|asset| {
                 asset.blob_hash.map(|blob_hash| CheckpointAsset {
-                    asset_id: asset.path.clone(),
+                    asset_id: asset.asset_id.unwrap_or_else(|| asset.path.clone()),
                     path: asset.path,
                     blob_hash,
                 })
@@ -1631,6 +1708,7 @@ pub(crate) async fn materialize_checkpoint_snapshot(
         checked_out_assets.push(WorkspaceFile {
             path: asset.path.clone(),
             blob_hash: asset.blob_hash.clone(),
+            asset_id: Some(asset.asset_id.clone()),
         });
     }
     save_workspace(&WorkspaceState {
@@ -1653,10 +1731,19 @@ pub(crate) async fn send_lock_path_request(
     action: &str,
     endpoint: &str,
     path: &str,
+    repo_id: Option<&str>,
 ) -> Result<FileLockInfo> {
     let mut profile = load_profile()?;
     let client = reqwest::Client::new();
-    let payload = LockRequest { file_path: path };
+    let repo_id = match repo_id {
+        Some(repo_id) => repo_id.to_string(),
+        None => resolve_repo(&profile, None)?,
+    };
+    let payload = LockRequest {
+        file_path: path,
+        repo_id: &repo_id,
+        scope: "asset",
+    };
     let url = format!(
         "{}/v2/locks/{}",
         profile.server.trim_end_matches('/'),
@@ -1714,7 +1801,15 @@ pub(crate) async fn add_file(
     if stage.branch != branch {
         stage = StageFile::default_for_branch(branch);
     }
-    upsert_stage_asset(&mut stage, &repo_path, Some(blob_hash.clone()), None);
+    let asset_id = load_workspace().ok().and_then(|workspace| {
+        (workspace.branch == branch)
+            .then_some(workspace.checked_out_assets)
+            .into_iter()
+            .flatten()
+            .find(|asset| asset.path == repo_path)
+            .and_then(|asset| asset.asset_id)
+    });
+    upsert_stage_asset(&mut stage, &repo_path, Some(blob_hash.clone()), asset_id);
     save_stage(&stage)?;
     println!(
         "staged file {} as {} on {} (blob={})",

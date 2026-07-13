@@ -52,11 +52,12 @@ pub(crate) async fn execute(args: RevertArgs) -> Result<()> {
     }
 
     let has_staged_delta = stage.assets.iter().any(|asset| asset.path == asset_path);
-    let base_hash = workspace
+    let base_asset = workspace
         .checked_out_assets
         .iter()
-        .find(|asset| asset.path == asset_path)
-        .map(|asset| asset.blob_hash.clone());
+        .find(|asset| asset.path == asset_path);
+    let base_hash = base_asset.map(|asset| asset.blob_hash.clone());
+    let base_asset_id = base_asset.and_then(|asset| asset.asset_id.clone());
     let local_hash = hash_local_asset(&workspace_root, &asset_path)?;
     let overwrites_local_change = match (local_hash.as_deref(), base_hash.as_deref()) {
         (Some(local), Some(base)) => local != base,
@@ -90,7 +91,7 @@ pub(crate) async fn execute(args: RevertArgs) -> Result<()> {
 
     let snapshot_asset = find_snapshot_asset(&snapshot, &asset_path);
 
-    let _update = match snapshot_asset {
+    let (update, restored_hash) = match snapshot_asset {
         Some(asset) => {
             let bytes = fetch_blob_bytes(&client, &mut profile, &asset.blob_hash).await?;
             if let Some(parent) = target.parent() {
@@ -109,51 +110,7 @@ pub(crate) async fn execute(args: RevertArgs) -> Result<()> {
                 asset.asset_id.clone(),
             );
 
-            if !args.keep_lock {
-                if let Err(err) =
-                    send_lock_path_request("lock release", "release", &asset_path).await
-                {
-                    eprintln!(
-                        "warning: reverted {}, but failed to release lock: {err}",
-                        asset_path
-                    );
-                    eprintln!(
-                        "run `ht lock release --path {}` manually if needed",
-                        asset_path
-                    );
-                }
-            }
-
-            if json_output_enabled() {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "ok": true,
-                        "asset_path": asset_path,
-                        "restored_hash": asset.blob_hash,
-                    }))?
-                );
-            } else {
-                println!(
-                    "reverted {} to {} on {}@{}{}",
-                    asset_path,
-                    snapshot
-                        .changeset_id
-                        .as_deref()
-                        .unwrap_or(ROOT_BASE_CHANGESET_ID),
-                    repo,
-                    branch,
-                    if update.removed_staged_delta {
-                        " (removed staged delta)"
-                    } else if update.staged_delta {
-                        " (staged delta)"
-                    } else {
-                        ""
-                    }
-                );
-            }
-
-            update
+            (update, Some(asset.blob_hash.clone()))
         }
         None => {
             // Asset not found in target snapshot — stage a deletion
@@ -168,40 +125,71 @@ pub(crate) async fn execute(args: RevertArgs) -> Result<()> {
                 &asset_path,
                 None,
                 base_hash.as_deref(),
-                None,
+                base_asset_id,
             );
 
-            if json_output_enabled() {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "ok": true,
-                        "asset_path": asset_path,
-                        "restored_hash": null,
-                        "staged_deletion": true,
-                    }))?
-                );
-            } else {
-                println!(
-                    "reverted {} to absent on {}@{}{}",
-                    asset_path,
-                    repo,
-                    branch,
-                    if update.staged_delta {
-                        " (staged deletion)"
-                    } else {
-                        ""
-                    }
-                );
-            }
-
-            update
+            (update, None)
         }
     };
 
     workspace.last_synced_at = now_unix();
     save_workspace(&workspace)?;
     save_stage(&stage)?;
+    if !args.keep_lock {
+        if let Err(err) =
+            send_lock_path_request("lock release", "release", &asset_path, Some(&repo)).await
+        {
+            eprintln!(
+                "warning: reverted {}, but failed to release lock: {err}",
+                asset_path
+            );
+            eprintln!(
+                "run `ht lock release --path {}` manually if needed",
+                asset_path
+            );
+        }
+    }
+    if json_output_enabled() {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "asset_path": asset_path,
+                "restored_hash": restored_hash.as_deref(),
+                "staged_deletion": restored_hash.is_none() && update.staged_delta,
+            }))?
+        );
+    } else if restored_hash.is_some() {
+        println!(
+            "reverted {} to {} on {}@{}{}",
+            asset_path,
+            snapshot
+                .changeset_id
+                .as_deref()
+                .unwrap_or(ROOT_BASE_CHANGESET_ID),
+            repo,
+            branch,
+            if update.removed_staged_delta {
+                " (removed staged delta)"
+            } else if update.staged_delta {
+                " (staged delta)"
+            } else {
+                ""
+            }
+        );
+    } else {
+        println!(
+            "reverted {} to absent on {}@{}{}",
+            asset_path,
+            repo,
+            branch,
+            if update.staged_delta {
+                " (staged deletion)"
+            } else {
+                ""
+            }
+        );
+    }
     Ok(())
 }
 
@@ -232,19 +220,28 @@ fn remove_staged_asset(stage: &mut StageFile, asset_path: &str) -> bool {
     stage.assets.len() != original_len
 }
 
-fn update_workspace_asset(workspace: &mut WorkspaceState, asset_path: &str, blob_hash: &str) {
+fn update_workspace_asset(
+    workspace: &mut WorkspaceState,
+    asset_path: &str,
+    blob_hash: &str,
+    asset_id: Option<String>,
+) {
     if let Some(existing) = workspace
         .checked_out_assets
         .iter_mut()
         .find(|asset| asset.path == asset_path)
     {
         existing.blob_hash = blob_hash.to_string();
+        if asset_id.is_some() {
+            existing.asset_id = asset_id;
+        }
         return;
     }
 
     workspace.checked_out_assets.push(WorkspaceFile {
         path: asset_path.to_string(),
         blob_hash: blob_hash.to_string(),
+        asset_id,
     });
 }
 
@@ -258,7 +255,7 @@ fn apply_revert_state(
 ) -> RevertStateUpdate {
     if base_hash == blob_hash {
         if let Some(hash) = blob_hash {
-            update_workspace_asset(workspace, asset_path, hash);
+            update_workspace_asset(workspace, asset_path, hash, asset_id);
         }
         return RevertStateUpdate {
             removed_staged_delta: remove_staged_asset(stage, asset_path),
@@ -474,6 +471,7 @@ mod tests {
             checked_out_assets: vec![WorkspaceFile {
                 path: asset_path.to_string(),
                 blob_hash: base_hash.to_string(),
+                asset_id: None,
             }],
             last_synced_at: 1,
         })
@@ -521,11 +519,12 @@ mod tests {
             checked_out_assets: vec![WorkspaceFile {
                 path: "Content/A.uasset".to_string(),
                 blob_hash: "old".to_string(),
+                asset_id: None,
             }],
             last_synced_at: 1,
         };
 
-        update_workspace_asset(&mut workspace, "Content/A.uasset", "new");
+        update_workspace_asset(&mut workspace, "Content/A.uasset", "new", None);
 
         assert_eq!(workspace.checked_out_assets.len(), 1);
         assert_eq!(workspace.checked_out_assets[0].blob_hash, "new");
@@ -542,7 +541,7 @@ mod tests {
             last_synced_at: 1,
         };
 
-        update_workspace_asset(&mut workspace, "Content/A.uasset", "hash-a");
+        update_workspace_asset(&mut workspace, "Content/A.uasset", "hash-a", None);
 
         assert_eq!(workspace.checked_out_assets.len(), 1);
         assert_eq!(workspace.checked_out_assets[0].path, "Content/A.uasset");
@@ -559,6 +558,7 @@ mod tests {
             checked_out_assets: vec![WorkspaceFile {
                 path: "Content/A.uasset".to_string(),
                 blob_hash: "head-hash".to_string(),
+                asset_id: None,
             }],
             last_synced_at: 1,
         };
@@ -596,6 +596,7 @@ mod tests {
             checked_out_assets: vec![WorkspaceFile {
                 path: "Content/A.uasset".to_string(),
                 blob_hash: "head-hash".to_string(),
+                asset_id: None,
             }],
             last_synced_at: 1,
         };
@@ -841,5 +842,66 @@ mod tests {
             normalize_revert_asset_path(" Content\\A.uasset ").unwrap(),
             "Content/A.uasset"
         );
+    }
+
+    #[test]
+    fn workspace_path_resolution_rejects_parent_traversal() {
+        let root = std::env::current_dir().expect("current dir");
+        assert!(resolve_workspace_target(&root, "../outside.txt").is_err());
+        assert!(resolve_workspace_target(&root, "Content/A.uasset").is_ok());
+    }
+
+    #[test]
+    fn local_deletion_is_reported_as_a_workspace_conflict() {
+        let root = unique_workspace("deleted-conflict");
+        std::fs::create_dir_all(&root).expect("workspace root");
+        let workspace = WorkspaceState {
+            repo_id: "repo".to_string(),
+            branch: "main".to_string(),
+            workspace_root: root.to_string_lossy().to_string(),
+            base_changeset_id: Some("cs-1".to_string()),
+            checked_out_assets: vec![WorkspaceFile {
+                path: "Content/Missing.uasset".to_string(),
+                blob_hash: "0".repeat(64),
+                asset_id: Some("asset-missing".to_string()),
+            }],
+            last_synced_at: 1,
+        };
+
+        let conflicts = detect_local_modifications(&workspace).expect("detect conflicts");
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].path, "Content/Missing.uasset");
+        assert!(conflicts[0].local_hash.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn revert_deletion_preserves_the_base_asset_identity() {
+        let mut workspace = WorkspaceState {
+            repo_id: "repo".to_string(),
+            branch: "main".to_string(),
+            workspace_root: ".".to_string(),
+            base_changeset_id: Some("cs-head".to_string()),
+            checked_out_assets: vec![WorkspaceFile {
+                path: "Content/A.uasset".to_string(),
+                blob_hash: "head-hash".to_string(),
+                asset_id: Some("stable-asset-a".to_string()),
+            }],
+            last_synced_at: 1,
+        };
+        let mut stage = StageFile::default_for_branch("main");
+
+        apply_revert_state(
+            &mut workspace,
+            &mut stage,
+            "Content/A.uasset",
+            None,
+            Some("head-hash"),
+            Some("stable-asset-a".to_string()),
+        );
+
+        assert_eq!(stage.assets.len(), 1);
+        assert_eq!(stage.assets[0].asset_id.as_deref(), Some("stable-asset-a"));
+        assert!(stage.assets[0].blob_hash.is_none());
     }
 }

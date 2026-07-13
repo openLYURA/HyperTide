@@ -23,7 +23,9 @@ pub(crate) async fn execute(args: StatusArgs) -> Result<()> {
     let branch = args.branch.unwrap_or_else(|| workspace.branch.clone());
     let client = reqwest::Client::new();
     let stage = load_stage().unwrap_or_else(|_| StageFile::default_for_branch(&branch));
-    let locks = fetch_locks(&client, &mut profile).await.unwrap_or_default();
+    let locks = fetch_locks(&client, &mut profile, &repo)
+        .await
+        .unwrap_or_default();
     let head = resolve_base_changeset(&client, &mut profile, &repo, &branch, None).await?;
     let stale_base = workspace
         .base_changeset_id
