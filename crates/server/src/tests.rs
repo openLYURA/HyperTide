@@ -599,6 +599,41 @@ async fn lock_list_is_scoped_to_the_requested_repo() {
 }
 
 #[tokio::test]
+async fn legacy_lock_blocks_repo_scoped_changeset_submit() {
+    let state = test_state();
+    state
+        .lock_manager
+        .try_lock(
+            "Content/Legacy.uasset".to_string(),
+            "legacy-owner".to_string(),
+        )
+        .await
+        .expect("legacy lock");
+    let app = build_app(state, &test_config());
+    let payload = serde_json::json!({
+        "repo_id": "repo-a",
+        "branch": "main",
+        "base_changeset_id": "ROOT",
+        "author": "dev-admin",
+        "message": "must respect legacy lock",
+        "assets": [{
+            "path": "Content/Legacy.uasset",
+            "blob_hash": "0".repeat(64)
+        }]
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v2/changesets")
+        .header("content-type", "application/json")
+        .header("X-API-Key", test_master_key())
+        .body(Body::from(payload.to_string()))
+        .expect("submit request");
+
+    let response = app.oneshot(request).await.expect("submit response");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn submit_rejects_asset_paths_that_escape_the_workspace() {
     let app = build_app(test_state(), &test_config());
     let payload = serde_json::json!({

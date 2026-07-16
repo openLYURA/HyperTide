@@ -31,12 +31,16 @@ pub(crate) async fn execute(args: DiffArgs) -> Result<()> {
             (None, Some(_)) => true,
             _ => false,
         };
-        let staged = row.staged_hash.is_some();
+        let staged = row.staged;
         if changed || staged {
             has_diff = true;
             let base = row.base_hash.as_deref().unwrap_or("<none>");
             let local = row.local_hash.as_deref().unwrap_or("<none>");
-            let staged_str = row.staged_hash.as_deref().unwrap_or("<not staged>");
+            let staged_str = match (row.staged, row.staged_hash.as_deref()) {
+                (true, Some(hash)) => hash,
+                (true, None) => "<delete>",
+                (false, _) => "<not staged>",
+            };
             println!(
                 "{}\n  base:   {}\n  local:  {}\n  staged: {}",
                 row.path, base, local, staged_str

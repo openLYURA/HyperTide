@@ -464,6 +464,7 @@ pub(crate) struct AssetRow {
     pub base_hash: Option<String>,
     pub local_hash: Option<String>,
     pub staged_hash: Option<String>,
+    pub staged: bool,
 }
 
 #[allow(dead_code)]
@@ -670,11 +671,11 @@ pub(crate) fn upsert_stage_asset(
 pub(crate) fn classify_asset_status(
     base_hash: Option<&str>,
     local_hash: Option<&str>,
-    staged_hash: Option<&str>,
+    staged: bool,
     lock_owner: Option<&str>,
     stale_base: bool,
 ) -> AssetStatusKind {
-    if staged_hash.is_some() {
+    if staged {
         return AssetStatusKind::Staged;
     }
     if lock_owner.is_some() {
@@ -683,11 +684,10 @@ pub(crate) fn classify_asset_status(
     if stale_base {
         return AssetStatusKind::StaleBase;
     }
-    match (base_hash, local_hash, staged_hash) {
-        (_, _, Some(_)) => AssetStatusKind::Staged,
-        (Some(_), None, None) => AssetStatusKind::Deleted,
-        (Some(base), Some(local), None) if base != local => AssetStatusKind::Modified,
-        (None, Some(_), None) => AssetStatusKind::Added,
+    match (base_hash, local_hash) {
+        (Some(_), None) => AssetStatusKind::Deleted,
+        (Some(base), Some(local)) if base != local => AssetStatusKind::Modified,
+        (None, Some(_)) => AssetStatusKind::Added,
         _ => AssetStatusKind::Unmodified,
     }
 }
@@ -714,17 +714,15 @@ pub(crate) fn collect_asset_rows(
                 .iter()
                 .find(|asset| asset.path == path)
                 .map(|asset| asset.blob_hash.clone());
-            let staged_hash = stage
-                .assets
-                .iter()
-                .find(|asset| asset.path == path)
-                .and_then(|asset| asset.blob_hash.clone());
+            let staged_delta = stage.assets.iter().find(|asset| asset.path == path);
+            let staged_hash = staged_delta.and_then(|asset| asset.blob_hash.clone());
             let local_hash = hash_local_asset(&workspace_root, &path)?;
             Ok(AssetRow {
                 path,
                 base_hash,
                 local_hash,
                 staged_hash,
+                staged: staged_delta.is_some(),
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1819,4 +1817,57 @@ pub(crate) async fn add_file(
         blob_hash
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staged_deletion_is_preserved_in_asset_rows_and_status() {
+        let root = std::env::temp_dir().join(format!(
+            "hypertide-staged-deletion-{}-{}",
+            std::process::id(),
+            now_unix()
+        ));
+        fs::create_dir_all(&root).expect("create workspace root");
+        let workspace = WorkspaceState {
+            repo_id: "repo-a".to_string(),
+            branch: "main".to_string(),
+            workspace_root: root.to_string_lossy().to_string(),
+            base_changeset_id: Some("cs-1".to_string()),
+            checked_out_assets: vec![WorkspaceFile {
+                path: "Content/A.uasset".to_string(),
+                blob_hash: "0".repeat(64),
+                asset_id: Some("asset-a".to_string()),
+            }],
+            last_synced_at: 1,
+        };
+        let stage = StageFile {
+            branch: "main".to_string(),
+            base_changeset_id: Some("cs-1".to_string()),
+            assets: vec![AssetDelta {
+                path: "Content/A.uasset".to_string(),
+                blob_hash: None,
+                asset_id: Some("asset-a".to_string()),
+            }],
+        };
+
+        let rows = collect_asset_rows(&workspace, &stage).expect("collect rows");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].staged);
+        assert!(rows[0].staged_hash.is_none());
+        assert_eq!(
+            classify_asset_status(
+                rows[0].base_hash.as_deref(),
+                rows[0].local_hash.as_deref(),
+                rows[0].staged,
+                None,
+                false,
+            ),
+            AssetStatusKind::Staged
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
 }

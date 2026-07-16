@@ -5,6 +5,7 @@ use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 pub mod repo_pg;
@@ -119,6 +120,16 @@ impl LockManager {
             return Ok(effective_lock);
         }
 
+        if let Some(legacy) = self.active_legacy_lock(repo_id, scope, &file_path) {
+            if legacy.owner_id != owner_id {
+                return Err(HyperTideError::Conflict(format!(
+                    "File is already locked by {}",
+                    legacy.owner_id
+                )));
+            }
+            return Ok(legacy);
+        }
+
         match self.locks.entry(lock_key) {
             Entry::Occupied(mut occupied) => {
                 let existing = occupied.get().clone();
@@ -157,12 +168,10 @@ impl LockManager {
         repo_id: &str,
         scope: &str,
     ) -> Result<FileLock, HyperTideError> {
-        let lock_key = Self::lock_key(repo_id, scope, file_path);
         let existing = self
-            .locks
-            .get(&lock_key)
-            .map(|entry| entry.clone())
+            .context_lock(repo_id, scope, file_path)
             .ok_or_else(|| HyperTideError::NotFound("File is not locked".to_string()))?;
+        let lock_key = Self::lock_key(&existing.repo_id, &existing.scope, &existing.file_path);
 
         if existing.owner_id != owner_id {
             return Err(HyperTideError::PermissionDenied(format!(
@@ -172,7 +181,7 @@ impl LockManager {
         }
         if self.is_expired(&existing) {
             if let Some(repo) = &self.repo {
-                repo.delete_lock(repo_id, scope, file_path)
+                repo.delete_lock(&existing.repo_id, &existing.scope, &existing.file_path)
                     .await
                     .map_err(|e| {
                         HyperTideError::Persistence(format!("failed to cleanup expired lock: {e}"))
@@ -212,22 +221,20 @@ impl LockManager {
         repo_id: &str,
         scope: &str,
     ) -> Result<FileLock, HyperTideError> {
-        let lock_key = Self::lock_key(repo_id, scope, file_path);
+        let existing = self
+            .context_lock(repo_id, scope, file_path)
+            .ok_or_else(|| HyperTideError::NotFound("File is not locked".to_string()))?;
+        let lock_key = Self::lock_key(&existing.repo_id, &existing.scope, &existing.file_path);
         // We need to check ownership before removing
-        let existing = if let Some(existing) = self.locks.get(&lock_key) {
-            if existing.owner_id != owner_id {
-                return Err(HyperTideError::PermissionDenied(format!(
-                    "Cannot unlock: File is locked by {}",
-                    existing.owner_id
-                )));
-            }
-            existing.clone()
-        } else {
-            return Err(HyperTideError::NotFound("File is not locked".to_string()));
-        };
+        if existing.owner_id != owner_id {
+            return Err(HyperTideError::PermissionDenied(format!(
+                "Cannot unlock: File is locked by {}",
+                existing.owner_id
+            )));
+        }
 
         if let Some(repo) = &self.repo {
-            repo.delete_lock(repo_id, scope, file_path)
+            repo.delete_lock(&existing.repo_id, &existing.scope, &existing.file_path)
                 .await
                 .map_err(|e| HyperTideError::Persistence(format!("failed to delete lock: {e}")))?;
         }
@@ -247,9 +254,23 @@ impl LockManager {
         repo_id: &str,
         scope: &str,
     ) -> Result<bool, HyperTideError> {
-        let lock_key = Self::lock_key(repo_id, scope, file_path);
+        let effective = self.context_lock(repo_id, scope, file_path);
+        let lock_key = effective
+            .as_ref()
+            .map(|lock| Self::lock_key(&lock.repo_id, &lock.scope, &lock.file_path))
+            .unwrap_or_else(|| Self::lock_key(repo_id, scope, file_path));
         if let Some(repo) = &self.repo {
-            repo.delete_lock(repo_id, scope, file_path)
+            let (effective_repo, effective_scope, effective_path) = effective
+                .as_ref()
+                .map(|lock| {
+                    (
+                        lock.repo_id.as_str(),
+                        lock.scope.as_str(),
+                        lock.file_path.as_str(),
+                    )
+                })
+                .unwrap_or((repo_id, scope, file_path));
+            repo.delete_lock(effective_repo, effective_scope, effective_path)
                 .await
                 .map_err(|e| {
                     HyperTideError::Persistence(format!("failed to force release lock: {e}"))
@@ -268,11 +289,33 @@ impl LockManager {
     }
 
     pub fn list_locks_with_repo(&self, repo_id: &str, scope: &str) -> Vec<FileLock> {
-        self.locks
-            .iter()
-            .map(|entry| entry.value().clone())
-            .filter(|lock| lock.repo_id == repo_id && lock.scope == scope && !self.is_expired(lock))
-            .collect()
+        let mut legacy_paths = HashSet::new();
+        let mut locks = Vec::new();
+        if !repo_id.is_empty() {
+            for lock in self
+                .locks
+                .iter()
+                .map(|entry| entry.value().clone())
+                .filter(|lock| {
+                    lock.repo_id.is_empty() && lock.scope == scope && !self.is_expired(lock)
+                })
+            {
+                legacy_paths.insert(lock.file_path.clone());
+                locks.push(lock);
+            }
+        }
+        locks.extend(
+            self.locks
+                .iter()
+                .map(|entry| entry.value().clone())
+                .filter(|lock| {
+                    lock.repo_id == repo_id
+                        && lock.scope == scope
+                        && !legacy_paths.contains(&lock.file_path)
+                        && !self.is_expired(lock)
+                }),
+        );
+        locks
     }
 
     /// Query lock by path.
@@ -286,11 +329,27 @@ impl LockManager {
         scope: &str,
         file_path: &str,
     ) -> Option<FileLock> {
-        let lock_key = Self::lock_key(repo_id, scope, file_path);
+        self.context_lock(repo_id, scope, file_path)
+            .filter(|lock| !self.is_expired(lock))
+    }
+
+    fn active_legacy_lock(&self, repo_id: &str, scope: &str, file_path: &str) -> Option<FileLock> {
+        if repo_id.is_empty() {
+            return None;
+        }
         self.locks
-            .get(&lock_key)
+            .get(&Self::lock_key("", scope, file_path))
             .map(|entry| entry.clone())
             .filter(|lock| !self.is_expired(lock))
+    }
+
+    fn context_lock(&self, repo_id: &str, scope: &str, file_path: &str) -> Option<FileLock> {
+        self.active_legacy_lock(repo_id, scope, file_path)
+            .or_else(|| {
+                self.locks
+                    .get(&Self::lock_key(repo_id, scope, file_path))
+                    .map(|entry| entry.clone())
+            })
     }
 
     fn next_lease_expiry(&self) -> DateTime<Utc> {
@@ -353,5 +412,38 @@ mod tests {
                 .owner_id,
             "bob"
         );
+    }
+
+    #[tokio::test]
+    async fn repo_scoped_operations_honor_and_release_legacy_locks() {
+        let manager = LockManager::new();
+        manager
+            .try_lock("Content/Legacy.uasset".to_string(), "alice".to_string())
+            .await
+            .expect("legacy lock");
+
+        let visible = manager
+            .get_lock_with_repo("repo-a", "asset", "Content/Legacy.uasset")
+            .expect("legacy lock is visible in repo context");
+        assert_eq!(visible.owner_id, "alice");
+        assert!(manager
+            .try_lock_with_repo(
+                "Content/Legacy.uasset".to_string(),
+                "bob".to_string(),
+                "repo-a",
+                "asset",
+            )
+            .await
+            .is_err());
+        assert_eq!(manager.list_locks_with_repo("repo-a", "asset").len(), 1);
+
+        let released = manager
+            .unlock_with_repo("Content/Legacy.uasset", "alice", "repo-a", "asset")
+            .await
+            .expect("release legacy lock through repo context");
+        assert!(released.repo_id.is_empty());
+        assert!(manager
+            .get_lock_with_repo("repo-a", "asset", "Content/Legacy.uasset")
+            .is_none());
     }
 }

@@ -52,6 +52,7 @@ pub(crate) async fn execute(args: StatusArgs) -> Result<()> {
             base_hash: Option<String>,
             local_hash: Option<String>,
             staged_hash: Option<String>,
+            staged_deletion: bool,
         }
         let items: Vec<JsonAssetStatus> = rows
             .iter()
@@ -60,7 +61,7 @@ pub(crate) async fn execute(args: StatusArgs) -> Result<()> {
                 let status = classify_asset_status(
                     row.base_hash.as_deref(),
                     row.local_hash.as_deref(),
-                    row.staged_hash.as_deref(),
+                    row.staged,
                     lock_owner,
                     stale_base,
                 );
@@ -70,6 +71,7 @@ pub(crate) async fn execute(args: StatusArgs) -> Result<()> {
                     base_hash: row.base_hash.clone(),
                     local_hash: row.local_hash.clone(),
                     staged_hash: row.staged_hash.clone(),
+                    staged_deletion: row.staged && row.staged_hash.is_none(),
                 }
             })
             .collect();
@@ -80,7 +82,7 @@ pub(crate) async fn execute(args: StatusArgs) -> Result<()> {
             let status = classify_asset_status(
                 row.base_hash.as_deref(),
                 row.local_hash.as_deref(),
-                row.staged_hash.as_deref(),
+                row.staged,
                 lock_owner,
                 stale_base,
             );
