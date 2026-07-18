@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     extract::{ConnectInfo, DefaultBodyLimit, MatchedPath, State},
-    http::{HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
@@ -63,6 +63,7 @@ pub(crate) fn build_app(state: AppState, config: &AppConfig) -> Router {
         limiter: rate_limiter,
         metrics: metrics.clone(),
         auth_manager: state.auth_manager.clone(),
+        trusted_proxy_cidrs: config.trusted_proxy_cidrs.clone(),
     };
 
     let general_routes = Router::new()
@@ -209,12 +210,72 @@ async fn enforce_rate_limit(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|connect_info| connect_info.0.ip());
-    let bucket = rate_limit_bucket(&rate_limit, bearer, api_key, peer_ip).await;
+    let client_ip = resolve_client_ip(request.headers(), peer_ip, &rate_limit.trusted_proxy_cidrs);
+    if (bearer.is_some() || api_key.is_some())
+        && !rate_limit
+            .limiter
+            .allow(&ip_bucket("auth-lookup", client_ip))
+    {
+        rate_limit.metrics.record_rate_limited();
+        return (StatusCode::TOO_MANY_REQUESTS, "RATE_LIMITED").into_response();
+    }
+    let bucket = rate_limit_bucket(&rate_limit, bearer, api_key, client_ip).await;
     if !rate_limit.limiter.allow(&bucket) {
         rate_limit.metrics.record_rate_limited();
         return (StatusCode::TOO_MANY_REQUESTS, "RATE_LIMITED").into_response();
     }
     next.run(request).await
+}
+
+fn resolve_client_ip(
+    headers: &HeaderMap,
+    peer_ip: Option<IpAddr>,
+    trusted_proxy_cidrs: &[ipnet::IpNet],
+) -> Option<IpAddr> {
+    let peer_ip = peer_ip?;
+    if !is_trusted_proxy(peer_ip, trusted_proxy_cidrs) {
+        return Some(peer_ip);
+    }
+
+    forwarded_for_client_ip(headers, trusted_proxy_cidrs)
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse().ok())
+        })
+        .or(Some(peer_ip))
+}
+
+fn forwarded_for_client_ip(
+    headers: &HeaderMap,
+    trusted_proxy_cidrs: &[ipnet::IpNet],
+) -> Option<IpAddr> {
+    let mut forwarded = Vec::new();
+    for value in headers.get_all("x-forwarded-for") {
+        let value = value.to_str().ok()?;
+        for address in value.split(',') {
+            forwarded.push(address.trim().parse::<IpAddr>().ok()?);
+        }
+    }
+    forwarded
+        .iter()
+        .rev()
+        .copied()
+        .find(|address| !is_trusted_proxy(*address, trusted_proxy_cidrs))
+        .or_else(|| forwarded.first().copied())
+}
+
+fn is_trusted_proxy(address: IpAddr, trusted_proxy_cidrs: &[ipnet::IpNet]) -> bool {
+    trusted_proxy_cidrs
+        .iter()
+        .any(|network| network.contains(&address))
+}
+
+fn ip_bucket(prefix: &str, client_ip: Option<IpAddr>) -> String {
+    client_ip
+        .map(|ip| format!("{prefix}:{ip}"))
+        .unwrap_or_else(|| prefix.to_string())
 }
 
 async fn rate_limit_bucket(
@@ -236,7 +297,5 @@ async fn rate_limit_bucket(
             return format!("principal:{}", identity.owner_id);
         }
     }
-    peer_ip
-        .map(|ip| format!("anonymous:{ip}"))
-        .unwrap_or_else(|| "anonymous".to_string())
+    ip_bucket("anonymous", peer_ip)
 }

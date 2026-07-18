@@ -91,6 +91,7 @@ fn validate_server_env(env: &HashMap<String, String>) -> DoctorReport {
         "HIGH_RISK_SIGNING_SECRET",
         "CORS_ALLOWED_ORIGINS",
         "RATE_LIMIT_REQUESTS_PER_MINUTE",
+        "TRUSTED_PROXY_CIDRS",
         "STORAGE_PATH",
     ] {
         match env.get(required).filter(|value| !value.trim().is_empty()) {
@@ -213,6 +214,7 @@ HIGH_RISK_SIGNATURE_REQUIRED=true
 HIGH_RISK_SIGNING_SECRET=secure-secret
 CORS_ALLOWED_ORIGINS=https://hypertide.example.com
 RATE_LIMIT_REQUESTS_PER_MINUTE=600
+TRUSTED_PROXY_CIDRS=172.16.0.0/12
 STORAGE_PATH=/app/storage
 "#,
         );

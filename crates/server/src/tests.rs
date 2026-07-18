@@ -31,6 +31,7 @@ fn test_config() -> AppConfig {
         storage_path: "./storage".to_string(),
         cors_allowed_origins: Vec::<HeaderValue>::new(),
         rate_limit_requests_per_minute: 600,
+        trusted_proxy_cidrs: Vec::new(),
         log_format: LogFormat::Plain,
     }
 }
@@ -530,6 +531,93 @@ async fn invalid_bearer_tokens_use_the_anonymous_peer_ip_bucket() {
     ));
     let other_peer_response = app.oneshot(other_peer).await.expect("other peer response");
     assert_eq!(other_peer_response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn trusted_proxy_forwarded_clients_use_separate_anonymous_buckets() {
+    let mut config = test_config_with_rate_limit(1);
+    config.trusted_proxy_cidrs = vec!["10.0.0.0/8".parse().expect("cidr")];
+    let app = build_app(test_state(), &config);
+
+    let mut first = Request::builder()
+        .uri("/health/live")
+        .header("X-Forwarded-For", "192.0.2.1, 10.0.0.4")
+        .body(Body::empty())
+        .expect("first request");
+    first.extensions_mut().insert(ConnectInfo(
+        "10.0.0.5:4000".parse::<SocketAddr>().expect("proxy"),
+    ));
+    let first_response = app.clone().oneshot(first).await.expect("first response");
+    assert_eq!(first_response.status(), StatusCode::OK);
+
+    let mut second = Request::builder()
+        .uri("/health/live")
+        .header("X-Real-IP", "192.0.2.2")
+        .body(Body::empty())
+        .expect("second request");
+    second.extensions_mut().insert(ConnectInfo(
+        "10.0.0.5:5000".parse::<SocketAddr>().expect("proxy"),
+    ));
+    let second_response = app.oneshot(second).await.expect("second response");
+    assert_eq!(second_response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn untrusted_peers_cannot_spoof_forwarded_rate_limit_addresses() {
+    let app = build_app(test_state(), &test_config_with_rate_limit(1));
+
+    let mut first = Request::builder()
+        .uri("/health/live")
+        .header("X-Forwarded-For", "192.0.2.1")
+        .body(Body::empty())
+        .expect("first request");
+    first.extensions_mut().insert(ConnectInfo(
+        "198.51.100.5:4000".parse::<SocketAddr>().expect("peer"),
+    ));
+    let first_response = app.clone().oneshot(first).await.expect("first response");
+    assert_eq!(first_response.status(), StatusCode::OK);
+
+    let mut second = Request::builder()
+        .uri("/health/live")
+        .header("X-Forwarded-For", "192.0.2.2")
+        .body(Body::empty())
+        .expect("second request");
+    second.extensions_mut().insert(ConnectInfo(
+        "198.51.100.5:5000".parse::<SocketAddr>().expect("peer"),
+    ));
+    let second_response = app.oneshot(second).await.expect("second response");
+    assert_eq!(second_response.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn auth_lookup_pre_limit_rejects_before_credential_bucket_selection() {
+    let app = build_app(test_state(), &test_config_with_rate_limit(1));
+
+    let mut invalid = Request::builder()
+        .uri("/health/live")
+        .header("X-API-Key", "invalid")
+        .body(Body::empty())
+        .expect("invalid request");
+    invalid.extensions_mut().insert(ConnectInfo(
+        "192.0.2.1:4000".parse::<SocketAddr>().expect("peer"),
+    ));
+    let invalid_response = app
+        .clone()
+        .oneshot(invalid)
+        .await
+        .expect("invalid response");
+    assert_eq!(invalid_response.status(), StatusCode::OK);
+
+    let mut valid = Request::builder()
+        .uri("/health/live")
+        .header("X-API-Key", test_master_key())
+        .body(Body::empty())
+        .expect("valid request");
+    valid.extensions_mut().insert(ConnectInfo(
+        "192.0.2.1:5000".parse::<SocketAddr>().expect("peer"),
+    ));
+    let valid_response = app.oneshot(valid).await.expect("valid response");
+    assert_eq!(valid_response.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]

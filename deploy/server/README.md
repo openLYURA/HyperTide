@@ -35,5 +35,6 @@ powershell -ExecutionPolicy Bypass -File .\deploy\server\smoke.ps1
 - JWT keys are generated into `deploy/server/keys/`.
 - Persistent asset storage remains at the repository-level `storage/` directory.
 - `RATE_LIMIT_REQUESTS_PER_MINUTE` defaults to `600`; set `0` only for trusted development environments.
+- Production proxy deployments must set `TRUSTED_PROXY_CIDRS`; forwarded client IP headers are ignored unless the direct peer is in one of these CIDRs.
 - Prefer `WITNESS_CONFIG_JSON` or `WITNESS_CONFIG_FILE` for witness configuration. Legacy `WITNESS_KEYS` remains supported for compatibility.
 - For production, set `APP_ENV=production`, replace the example database password, pepper, JWT keys, witness secrets, and high-risk signing secret.

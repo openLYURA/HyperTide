@@ -108,6 +108,7 @@ pub(crate) async fn execute(args: RevertArgs) -> Result<()> {
                 Some(&asset.blob_hash),
                 base_hash.as_deref(),
                 asset.asset_id.clone(),
+                base_asset_id.as_deref(),
             );
 
             (update, Some(asset.blob_hash.clone()))
@@ -125,7 +126,8 @@ pub(crate) async fn execute(args: RevertArgs) -> Result<()> {
                 &asset_path,
                 None,
                 base_hash.as_deref(),
-                base_asset_id,
+                base_asset_id.clone(),
+                base_asset_id.as_deref(),
             );
 
             (update, None)
@@ -252,10 +254,21 @@ fn apply_revert_state(
     blob_hash: Option<&str>,
     base_hash: Option<&str>,
     asset_id: Option<String>,
+    base_asset_id: Option<&str>,
 ) -> RevertStateUpdate {
-    if base_hash == blob_hash {
+    let target_asset_id = blob_hash.and(asset_id.as_deref());
+    let same_asset_identity = match (base_asset_id, target_asset_id) {
+        (Some(base), Some(target)) => base == target,
+        _ => true,
+    };
+    if base_hash == blob_hash && same_asset_identity {
         if let Some(hash) = blob_hash {
-            update_workspace_asset(workspace, asset_path, hash, asset_id);
+            update_workspace_asset(
+                workspace,
+                asset_path,
+                hash,
+                target_asset_id.map(str::to_string),
+            );
         }
         return RevertStateUpdate {
             removed_staged_delta: remove_staged_asset(stage, asset_path),
@@ -571,6 +584,7 @@ mod tests {
             Some("old-hash"),
             Some("head-hash"),
             None,
+            None,
         );
 
         assert_eq!(
@@ -617,6 +631,7 @@ mod tests {
             Some("head-hash"),
             Some("head-hash"),
             None,
+            None,
         );
 
         assert_eq!(
@@ -628,6 +643,48 @@ mod tests {
         );
         assert_eq!(workspace.checked_out_assets[0].blob_hash, "head-hash");
         assert!(stage.assets.is_empty());
+    }
+
+    #[test]
+    fn apply_revert_state_stages_asset_identity_change_with_same_blob() {
+        let mut workspace = WorkspaceState {
+            repo_id: "repo".to_string(),
+            branch: "main".to_string(),
+            workspace_root: ".".to_string(),
+            base_changeset_id: Some("cs-head".to_string()),
+            checked_out_assets: vec![WorkspaceFile {
+                path: "Content/A.uasset".to_string(),
+                blob_hash: "same-hash".to_string(),
+                asset_id: Some("asset-current".to_string()),
+            }],
+            last_synced_at: 1,
+        };
+        let mut stage = StageFile::default_for_branch("main");
+
+        let update = apply_revert_state(
+            &mut workspace,
+            &mut stage,
+            "Content/A.uasset",
+            Some("same-hash"),
+            Some("same-hash"),
+            Some("asset-old".to_string()),
+            Some("asset-current"),
+        );
+
+        assert_eq!(
+            update,
+            RevertStateUpdate {
+                removed_staged_delta: false,
+                staged_delta: true,
+            }
+        );
+        assert_eq!(
+            workspace.checked_out_assets[0].asset_id.as_deref(),
+            Some("asset-current")
+        );
+        assert_eq!(stage.assets.len(), 1);
+        assert_eq!(stage.assets[0].blob_hash.as_deref(), Some("same-hash"));
+        assert_eq!(stage.assets[0].asset_id.as_deref(), Some("asset-old"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -898,6 +955,7 @@ mod tests {
             None,
             Some("head-hash"),
             Some("stable-asset-a".to_string()),
+            Some("stable-asset-a"),
         );
 
         assert_eq!(stage.assets.len(), 1);

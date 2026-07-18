@@ -279,6 +279,7 @@ pub(crate) struct RateLimitState {
     pub(crate) limiter: RateLimiter,
     pub(crate) metrics: HttpMetrics,
     pub(crate) auth_manager: AuthManager,
+    pub(crate) trusted_proxy_cidrs: Vec<ipnet::IpNet>,
 }
 
 fn escape_label_value(value: &str) -> String {
