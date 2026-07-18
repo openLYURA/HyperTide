@@ -23,7 +23,9 @@ pub(crate) async fn execute(args: StatusArgs) -> Result<()> {
     let branch = args.branch.unwrap_or_else(|| workspace.branch.clone());
     let client = reqwest::Client::new();
     let stage = load_stage().unwrap_or_else(|_| StageFile::default_for_branch(&branch));
-    let locks = fetch_locks(&client, &mut profile).await.unwrap_or_default();
+    let locks = fetch_locks(&client, &mut profile, &repo)
+        .await
+        .unwrap_or_default();
     let head = resolve_base_changeset(&client, &mut profile, &repo, &branch, None).await?;
     let stale_base = workspace
         .base_changeset_id
@@ -50,6 +52,7 @@ pub(crate) async fn execute(args: StatusArgs) -> Result<()> {
             base_hash: Option<String>,
             local_hash: Option<String>,
             staged_hash: Option<String>,
+            staged_deletion: bool,
         }
         let items: Vec<JsonAssetStatus> = rows
             .iter()
@@ -58,7 +61,7 @@ pub(crate) async fn execute(args: StatusArgs) -> Result<()> {
                 let status = classify_asset_status(
                     row.base_hash.as_deref(),
                     row.local_hash.as_deref(),
-                    row.staged_hash.as_deref(),
+                    row.staged,
                     lock_owner,
                     stale_base,
                 );
@@ -68,6 +71,7 @@ pub(crate) async fn execute(args: StatusArgs) -> Result<()> {
                     base_hash: row.base_hash.clone(),
                     local_hash: row.local_hash.clone(),
                     staged_hash: row.staged_hash.clone(),
+                    staged_deletion: row.staged && row.staged_hash.is_none(),
                 }
             })
             .collect();
@@ -78,7 +82,7 @@ pub(crate) async fn execute(args: StatusArgs) -> Result<()> {
             let status = classify_asset_status(
                 row.base_hash.as_deref(),
                 row.local_hash.as_deref(),
-                row.staged_hash.as_deref(),
+                row.staged,
                 lock_owner,
                 stale_base,
             );

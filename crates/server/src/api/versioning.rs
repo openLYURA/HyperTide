@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::path::{Component, Path as FsPath};
 
 use crate::api::common::ApiResponse;
 use crate::api::middleware::authz;
@@ -190,6 +191,14 @@ fn map_versioning_error(error: VersioningError) -> (StatusCode, String) {
                 "Changeset state invalid: repo={repo_id}, changeset={changeset_id}, status={status:?}, expected={expected}"
             ),
         ),
+        VersioningError::InvalidAssetLayout { repo_id, message } => (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid asset layout for {repo_id}: {message}"),
+        ),
+        VersioningError::Persistence { message } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Versioning persistence failed: {message}"),
+        ),
     }
 }
 
@@ -209,13 +218,48 @@ fn validate_repo_and_branch(repo_id: &str, branch: &str) -> Result<(), (StatusCo
     Ok(())
 }
 
+fn validate_asset_paths(assets: &[AssetDelta]) -> Result<(), (StatusCode, String)> {
+    for asset in assets {
+        let normalized = asset.path.replace('\\', "/");
+        let path = FsPath::new(&normalized);
+        let bytes = normalized.as_bytes();
+        let has_windows_drive_prefix =
+            bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+        let invalid = normalized.trim().is_empty()
+            || normalized.ends_with('/')
+            || normalized.contains(':')
+            || has_windows_drive_prefix
+            || path.is_absolute()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    Component::CurDir
+                        | Component::ParentDir
+                        | Component::RootDir
+                        | Component::Prefix(_)
+                )
+            });
+        if invalid {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("invalid asset path: {}", asset.path),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn ensure_lock_access(
     state: &AppState,
     owner_id: &str,
+    repo_id: &str,
     assets: &[AssetDelta],
 ) -> Result<(), (StatusCode, String)> {
     for asset in assets {
-        if let Some(lock) = state.lock_manager.get_lock(&asset.path) {
+        if let Some(lock) = state
+            .lock_manager
+            .get_lock_with_repo(repo_id, "asset", &asset.path)
+        {
             if lock.owner_id != owner_id {
                 return Err((
                     StatusCode::CONFLICT,
@@ -233,6 +277,12 @@ async fn ensure_blob_exists(
 ) -> Result<(), (StatusCode, String)> {
     for asset in assets {
         if let Some(hash) = &asset.blob_hash {
+            if crate::core::storage::StorageManager::validate_hash(hash).is_err() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid blob hash: {hash}"),
+                ));
+            }
             match state.storage_manager.exists(hash).await {
                 Ok(true) => {}
                 Ok(false) => {
@@ -463,7 +513,11 @@ pub async fn submit_changeset(
         }
     }
 
-    if let Err(err) = ensure_lock_access(&state, &identity.owner_id, &assets) {
+    if let Err(err) = validate_asset_paths(&assets) {
+        return (err.0, Json(ApiResponse::err(err.1)));
+    }
+
+    if let Err(err) = ensure_lock_access(&state, &identity.owner_id, &payload.repo_id, &assets) {
         return (err.0, Json(ApiResponse::err(err.1)));
     }
     if let Err(err) = ensure_blob_exists(&state, &assets).await {
@@ -632,7 +686,8 @@ pub async fn rollback(
         }
     };
 
-    if let Err(err) = ensure_lock_access(&state, &identity.owner_id, &plan.assets) {
+    if let Err(err) = ensure_lock_access(&state, &identity.owner_id, &payload.repo_id, &plan.assets)
+    {
         return (err.0, Json(ApiResponse::err(err.1)));
     }
     if let Err(err) = ensure_blob_exists(&state, &plan.assets).await {

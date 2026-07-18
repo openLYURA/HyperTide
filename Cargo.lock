@@ -885,6 +885,7 @@ dependencies = [
  "dotenvy",
  "hex",
  "hmac",
+ "ipnet",
  "jsonwebtoken",
  "reqwest",
  "serde",
@@ -897,6 +898,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

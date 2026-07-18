@@ -1,4 +1,5 @@
 use axum::http::HeaderValue;
+use ipnet::IpNet;
 use std::path::Path;
 
 const DEV_MASTER_KEY: &str = "dev-master-key";
@@ -65,6 +66,7 @@ pub struct AppConfig {
     pub storage_path: String,
     pub cors_allowed_origins: Vec<HeaderValue>,
     pub rate_limit_requests_per_minute: u64,
+    pub trusted_proxy_cidrs: Vec<IpNet>,
     pub log_format: LogFormat,
 }
 
@@ -112,6 +114,10 @@ impl AppConfig {
             DEFAULT_RATE_LIMIT_REQUESTS_PER_MINUTE,
             "RATE_LIMIT_REQUESTS_PER_MINUTE",
         )?;
+        let trusted_proxy_cidrs = parse_cidr_list(lookup("TRUSTED_PROXY_CIDRS").as_deref())?;
+        if app_env.is_production() && trusted_proxy_cidrs.is_empty() {
+            return Err("TRUSTED_PROXY_CIDRS is required when APP_ENV=production".to_string());
+        }
         let default_log_format = if app_env.is_production() {
             LogFormat::Json
         } else {
@@ -128,9 +134,23 @@ impl AppConfig {
             storage_path,
             cors_allowed_origins,
             rate_limit_requests_per_minute,
+            trusted_proxy_cidrs,
             log_format,
         })
     }
+}
+
+fn parse_cidr_list(raw: Option<&str>) -> Result<Vec<IpNet>, String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<IpNet>()
+                .map_err(|_| format!("invalid TRUSTED_PROXY_CIDRS entry: {value}"))
+        })
+        .collect()
 }
 
 fn parse_origin_list(raw: Option<&str>) -> Result<Vec<HeaderValue>, String> {
@@ -257,7 +277,33 @@ mod tests {
         assert_eq!(cfg.app_env, AppEnv::Development);
         assert_eq!(cfg.master_key, "dev-master-key");
         assert!(cfg.cors_allowed_origins.is_empty());
+        assert!(cfg.trusted_proxy_cidrs.is_empty());
         assert_eq!(cfg.log_format, LogFormat::Plain);
+    }
+
+    #[test]
+    fn parses_trusted_proxy_cidrs() {
+        let cfg = AppConfig::from_lookup(|name| {
+            (name == "TRUSTED_PROXY_CIDRS").then(|| "10.0.0.0/8, 2001:db8::/32".to_string())
+        })
+        .expect("config");
+
+        assert_eq!(cfg.trusted_proxy_cidrs.len(), 2);
+        assert!(
+            cfg.trusted_proxy_cidrs[0].contains(&"10.1.2.3".parse::<std::net::IpAddr>().unwrap())
+        );
+        assert!(cfg.trusted_proxy_cidrs[1]
+            .contains(&"2001:db8::1".parse::<std::net::IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn rejects_invalid_trusted_proxy_cidrs() {
+        let err = AppConfig::from_lookup(|name| {
+            (name == "TRUSTED_PROXY_CIDRS").then(|| "not-a-cidr".to_string())
+        })
+        .expect_err("invalid cidr must fail");
+
+        assert!(err.contains("TRUSTED_PROXY_CIDRS"));
     }
 
     #[test]
@@ -295,6 +341,10 @@ mod tests {
             "secure-signing-secret".to_string(),
         );
         env.insert("AUTH_PEPPER".to_string(), "secure-pepper".to_string());
+        env.insert(
+            "TRUSTED_PROXY_CIDRS".to_string(),
+            "172.16.0.0/12".to_string(),
+        );
         insert_test_key_paths(&mut env);
         env.insert(
             "WITNESS_KEYS".to_string(),
@@ -324,6 +374,10 @@ mod tests {
             "secure-signing-secret".to_string(),
         );
         env.insert("AUTH_PEPPER".to_string(), "secure-pepper".to_string());
+        env.insert(
+            "TRUSTED_PROXY_CIDRS".to_string(),
+            "172.16.0.0/12".to_string(),
+        );
         insert_test_key_paths(&mut env);
         env.insert(
             "WITNESS_CONFIG_JSON".to_string(),
@@ -352,6 +406,10 @@ mod tests {
             "secure-signing-secret".to_string(),
         );
         env.insert("AUTH_PEPPER".to_string(), "secure-pepper".to_string());
+        env.insert(
+            "TRUSTED_PROXY_CIDRS".to_string(),
+            "172.16.0.0/12".to_string(),
+        );
         insert_test_key_paths(&mut env);
         env.insert(
             "WITNESS_KEYS".to_string(),

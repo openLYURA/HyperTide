@@ -41,7 +41,15 @@ pub(crate) async fn execute(args: AddArgs) -> Result<()> {
             if stage.branch != branch {
                 stage = StageFile::default_for_branch(&branch);
             }
-            upsert_stage_asset(&mut stage, &path, Some(blob));
+            let asset_id = load_workspace().ok().and_then(|workspace| {
+                (workspace.branch == branch)
+                    .then_some(workspace.checked_out_assets)
+                    .into_iter()
+                    .flatten()
+                    .find(|asset| asset.path == path)
+                    .and_then(|asset| asset.asset_id)
+            });
+            upsert_stage_asset(&mut stage, &path, Some(blob), asset_id);
             save_stage(&stage)?;
             println!("staged {} asset(s) on {}", stage.assets.len(), stage.branch);
             Ok(())

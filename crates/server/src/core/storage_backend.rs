@@ -108,7 +108,7 @@ impl LocalFsBackend {
 
     #[allow(dead_code)]
     fn object_path(&self, hash: &str) -> Option<PathBuf> {
-        if hash.len() < 3 {
+        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return None;
         }
         let (prefix, rest) = hash.split_at(2);
@@ -122,10 +122,22 @@ impl StorageBackend for LocalFsBackend {
         let object_path = self
             .object_path(hash)
             .ok_or_else(|| StorageError::Validation("invalid hash".to_string()))?;
+        let actual_hash = calculate_hash(data);
+        if actual_hash != hash {
+            return Err(StorageError::Validation(format!(
+                "content hash mismatch: expected {hash}, got {actual_hash}"
+            )));
+        }
 
         // Dedup: skip if already exists
         if object_path.exists() {
-            return Ok(());
+            let existing = fs::read(&object_path).await?;
+            if calculate_hash(&existing) == hash {
+                return Ok(());
+            }
+            return Err(StorageError::Validation(format!(
+                "existing CAS object failed integrity validation: {hash}"
+            )));
         }
 
         // Create subdirectory
@@ -163,20 +175,27 @@ impl StorageBackend for LocalFsBackend {
             )));
         }
 
-        Ok(fs::read(&object_path).await?)
+        let bytes = fs::read(&object_path).await?;
+        let actual_hash = calculate_hash(&bytes);
+        if actual_hash != hash {
+            return Err(StorageError::Validation(format!(
+                "content hash mismatch: expected {hash}, got {actual_hash}"
+            )));
+        }
+        Ok(bytes)
     }
 
     async fn exists(&self, hash: &str) -> Result<bool, StorageError> {
-        let Some(object_path) = self.object_path(hash) else {
-            return Ok(false);
-        };
+        let object_path = self
+            .object_path(hash)
+            .ok_or_else(|| StorageError::Validation("invalid hash".to_string()))?;
         Ok(object_path.exists())
     }
 
     async fn delete(&self, hash: &str) -> Result<(), StorageError> {
-        let Some(object_path) = self.object_path(hash) else {
-            return Ok(());
-        };
+        let object_path = self
+            .object_path(hash)
+            .ok_or_else(|| StorageError::Validation("invalid hash".to_string()))?;
         if object_path.exists() {
             fs::remove_file(&object_path).await?;
         }
@@ -218,6 +237,29 @@ impl StorageBackend for LocalFsBackend {
 mod tests {
     use super::*;
 
+    fn temp_backend(label: &str) -> (std::path::PathBuf, LocalFsBackend) {
+        let root = std::env::temp_dir().join(format!(
+            "hypertide-storage-backend-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        (root.clone(), LocalFsBackend::new(root))
+    }
+
+    #[tokio::test]
+    async fn local_backend_rejects_data_that_does_not_match_the_key() {
+        let (root, backend) = temp_backend("mismatch");
+        backend.init().await.expect("init backend");
+        let declared_hash = calculate_hash(b"declared");
+
+        let error = backend
+            .store(&declared_hash, b"different")
+            .await
+            .expect_err("mismatched content must be rejected");
+        assert!(error.to_string().contains("content hash mismatch"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn make_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "hypertide-backend-test-{name}-{}",
@@ -241,7 +283,7 @@ mod tests {
         assert_eq!(retrieved, data);
 
         assert!(backend.exists(&hash).await.unwrap());
-        assert!(!backend.exists("nonexistent").await.unwrap());
+        assert!(backend.exists("nonexistent").await.is_err());
 
         std::fs::remove_dir_all(root).ok();
     }

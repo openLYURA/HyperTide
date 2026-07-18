@@ -105,6 +105,15 @@ paths:
   /v2/locks:
     get:
       summary: List locks
+      parameters:
+        - in: query
+          name: repo_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: scope
+          required: false
+          schema: { type: string, default: asset }
       security:
         - ApiKeyAuth: []
         - BearerAuth: []

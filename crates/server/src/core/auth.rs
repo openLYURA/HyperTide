@@ -263,6 +263,7 @@ impl AuthManager {
             revoked: stored.revoked,
         };
         if api_key.is_valid() {
+            self.keys.insert(key.to_string(), api_key.clone());
             Some(api_key)
         } else {
             None

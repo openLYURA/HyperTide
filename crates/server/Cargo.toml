@@ -31,6 +31,10 @@ async-trait.workspace = true
 hmac.workspace = true
 sha2.workspace = true
 hex.workspace = true
+ipnet.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
 
 [features]
 # Public open-core builds keep this feature as a compatibility stub.

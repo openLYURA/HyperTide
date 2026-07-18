@@ -153,6 +153,10 @@ pub async fn check_exists(
     {
         return (status, Json(ApiResponse::err(message)));
     }
+    if let Err(error) = StorageManager::validate_hash(&hash) {
+        let (status, response) = map_error::<bool>(error);
+        return (status, Json(response));
+    }
 
     match state.storage_manager.exists(&hash).await {
         Ok(exists) => (StatusCode::OK, Json(ApiResponse::ok(exists))),

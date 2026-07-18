@@ -210,6 +210,7 @@ curl "http://localhost:3000/v2/changesets?repo_id=my-game&branch=main&limit=10" 
 | 变量 | 说明 | 默认值 |
 |---|---|---|
 | `STORAGE_PATH` | 文件存储路径 | `./storage` |
+| `MAX_COMPOSED_BLOB_BYTES` | 单次 manifest 合成的最大字节数 | `268435456` |
 
 ### 安全
 

@@ -128,12 +128,19 @@ Production startup must reject unsafe configuration. These settings are required
 - `WITNESS_CONFIG_JSON` or `WITNESS_CONFIG_FILE`
 - `CORS_ALLOWED_ORIGINS`
 - `RATE_LIMIT_REQUESTS_PER_MINUTE`
+- `TRUSTED_PROXY_CIDRS` (the CIDRs from which the server may trust `X-Forwarded-For`/`X-Real-IP`)
 - `STORAGE_PATH`
+
+Optional capacity tuning:
+
+- `MAX_COMPOSED_BLOB_BYTES` defaults to `268435456` (256 MiB). Raise it only when the server has enough memory for in-process blob composition.
+- Credential-bearing requests are first capped per resolved client IP before authentication lookup, then by authenticated principal. Raise the main rate limit carefully when many trusted clients legitimately share one source IP.
 
 Operational rules:
 
 - Terminate TLS at the reverse proxy.
 - Do not publish server port `3000` directly to the internet.
+- Keep `TRUSTED_PROXY_CIDRS` limited to the proxy network. Forwarded client-IP headers from any other peer are ignored.
 - Store `.env.production` and `keys/` outside public repos and ticket attachments.
 - Keep backups encrypted when moved off host.
 

@@ -75,9 +75,20 @@ impl LockRepoPg {
     pub async fn acquire_lock_atomic(&self, lock: &FileLock) -> Result<FileLock, sqlx::Error> {
         let row = sqlx::query_as::<_, LockRow>(
             r#"
-            WITH attempted AS (
+            WITH legacy_lock AS (
+                SELECT file_path, owner_id, locked_at, lease_expires_at, repo_id, scope
+                FROM locks
+                WHERE $5 <> ''
+                    AND repo_id = ''
+                    AND scope = $6
+                    AND file_path = $1
+                    AND force_released = FALSE
+                    AND (lease_expires_at IS NULL OR lease_expires_at > NOW())
+            ),
+            attempted AS (
                 INSERT INTO locks (file_path, owner_id, locked_at, lease_expires_at, force_released, repo_id, scope)
-                VALUES ($1, $2, $3, $4, FALSE, $5, $6)
+                SELECT $1, $2, $3, $4, FALSE, $5, $6
+                WHERE NOT EXISTS (SELECT 1 FROM legacy_lock)
                 ON CONFLICT (repo_id, scope, file_path)
                 DO UPDATE SET
                     owner_id = EXCLUDED.owner_id,
@@ -92,14 +103,20 @@ impl LockRepoPg {
             current_lock AS (
                 SELECT file_path, owner_id, locked_at, lease_expires_at, repo_id, scope
                 FROM locks
-                WHERE file_path = $1 AND force_released = FALSE
+                WHERE repo_id = $5 AND scope = $6 AND file_path = $1 AND force_released = FALSE
             )
             SELECT file_path, owner_id, locked_at, lease_expires_at, repo_id, scope
-            FROM attempted
-            UNION ALL
-            SELECT file_path, owner_id, locked_at, lease_expires_at, repo_id, scope
-            FROM current_lock
-            WHERE NOT EXISTS (SELECT 1 FROM attempted)
+            FROM (
+                SELECT file_path, owner_id, locked_at, lease_expires_at, repo_id, scope, 0 AS priority
+                FROM legacy_lock
+                UNION ALL
+                SELECT file_path, owner_id, locked_at, lease_expires_at, repo_id, scope, 1 AS priority
+                FROM attempted
+                UNION ALL
+                SELECT file_path, owner_id, locked_at, lease_expires_at, repo_id, scope, 2 AS priority
+                FROM current_lock
+            ) candidates
+            ORDER BY priority
             LIMIT 1
             "#,
         )
@@ -122,13 +139,20 @@ impl LockRepoPg {
         })
     }
 
-    pub async fn delete_lock(&self, file_path: &str) -> Result<(), sqlx::Error> {
+    pub async fn delete_lock(
+        &self,
+        repo_id: &str,
+        scope: &str,
+        file_path: &str,
+    ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
             DELETE FROM locks
-            WHERE file_path = $1
+            WHERE repo_id = $1 AND scope = $2 AND file_path = $3
             "#,
         )
+        .bind(repo_id)
+        .bind(scope)
         .bind(file_path)
         .execute(&self.pool)
         .await?;
