@@ -491,6 +491,48 @@ async fn invalid_credentials_share_the_anonymous_rate_limit_bucket() {
 }
 
 #[tokio::test]
+async fn invalid_bearer_tokens_use_the_anonymous_peer_ip_bucket() {
+    let app = build_app(test_state(), &test_config_with_rate_limit(1));
+
+    let mut first = Request::builder()
+        .uri("/health/live")
+        .header("Authorization", "Bearer invalid-a")
+        .body(Body::empty())
+        .expect("first request");
+    first.extensions_mut().insert(ConnectInfo(
+        "192.0.2.1:4000".parse::<SocketAddr>().expect("peer"),
+    ));
+    let first_response = app.clone().oneshot(first).await.expect("first response");
+    assert_eq!(first_response.status(), StatusCode::OK);
+
+    let mut same_peer = Request::builder()
+        .uri("/health/live")
+        .header("Authorization", "Bearer invalid-b")
+        .body(Body::empty())
+        .expect("same peer request");
+    same_peer.extensions_mut().insert(ConnectInfo(
+        "192.0.2.1:5000".parse::<SocketAddr>().expect("peer"),
+    ));
+    let same_peer_response = app
+        .clone()
+        .oneshot(same_peer)
+        .await
+        .expect("same peer response");
+    assert_eq!(same_peer_response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let mut other_peer = Request::builder()
+        .uri("/health/live")
+        .header("Authorization", "Bearer invalid-c")
+        .body(Body::empty())
+        .expect("other peer request");
+    other_peer.extensions_mut().insert(ConnectInfo(
+        "192.0.2.2:4000".parse::<SocketAddr>().expect("peer"),
+    ));
+    let other_peer_response = app.oneshot(other_peer).await.expect("other peer response");
+    assert_eq!(other_peer_response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn manifest_rejects_composed_blobs_over_the_memory_limit() {
     let app = build_app(test_state(), &test_config());
     let payload = serde_json::json!({

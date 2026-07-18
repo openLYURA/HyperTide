@@ -227,9 +227,7 @@ async fn rate_limit_bucket(
         if let Ok(identity) = rate_limit.auth_manager.validate_access_token(&token).await {
             return format!("principal:{}", identity.owner_id);
         }
-        return "anonymous".to_string();
-    }
-    if let Some(api_key) = api_key {
+    } else if let Some(api_key) = api_key {
         if let Ok(identity) = rate_limit
             .auth_manager
             .validate_api_key_identity(&api_key)
