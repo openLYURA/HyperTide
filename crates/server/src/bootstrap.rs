@@ -119,6 +119,14 @@ pub(crate) async fn run() {
         }
     };
 
+    let high_risk_guard = match HighRiskGuard::from_env(db_pool.clone()) {
+        Ok(guard) => guard,
+        Err(e) => {
+            tracing::error!("Failed to initialize high-risk guard: {e}");
+            std::process::exit(1);
+        }
+    };
+
     let state = AppState {
         lock_manager,
         storage_manager,
@@ -129,7 +137,7 @@ pub(crate) async fn run() {
         audit_chain: Some(AuditChain::new(db_pool.clone())),
         checkpoint_service: Some(CheckpointService::new(db_pool.clone())),
         witness_service: Some(WitnessService::from_env(db_pool.clone())),
-        high_risk_guard: Some(HighRiskGuard::from_env(db_pool.clone())),
+        high_risk_guard: Some(high_risk_guard),
         replay_service: Some(ReplayService::new(db_pool.clone())),
         retention_policy: RetentionPolicy::from_env(),
         db_pool: Some(db_pool),

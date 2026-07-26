@@ -603,15 +603,26 @@ pub(crate) fn normalize_asset_path(path: &Path) -> String {
 }
 
 pub(crate) fn confirm_dangerous(action: &str, yes: bool) -> Result<()> {
+    use std::io::IsTerminal;
+
     if yes {
         return Ok(());
     }
+    // Never silently "cancel" (as success) when there is no interactive terminal to
+    // prompt: automation that forgot --yes must get a hard error, not a no-op exit 0.
+    if !std::io::stdin().is_terminal() {
+        return Err(anyhow!(
+            "refusing dangerous operation ({action}) without confirmation; \
+             re-run with --yes to proceed non-interactively"
+        ));
+    }
     eprint!("dangerous operation: {}. confirm? [y/N] ", action);
     let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    if input.trim().to_lowercase() != "y" {
-        eprintln!("cancelled.");
-        std::process::exit(0);
+    let read = std::io::stdin().read_line(&mut input)?;
+    if read == 0 || input.trim().to_lowercase() != "y" {
+        // Return an error so a declined operation exits non-zero instead of
+        // reporting success to any calling script.
+        return Err(anyhow!("operation cancelled by user"));
     }
     Ok(())
 }
@@ -1692,8 +1703,10 @@ pub(crate) async fn materialize_checkpoint_snapshot(
     client: &reqwest::Client,
     profile: &mut CliProfile,
     snapshot: &CheckpointSnapshot,
+    force: bool,
 ) -> Result<()> {
     let workspace_root = std::env::current_dir()?;
+    guard_checkpoint_overwrite(&workspace_root, snapshot, force)?;
     let mut checked_out_assets = Vec::with_capacity(snapshot.assets.len());
     for asset in &snapshot.assets {
         let target = resolve_workspace_target(&workspace_root, &asset.path)?;
@@ -1720,6 +1733,75 @@ pub(crate) async fn materialize_checkpoint_snapshot(
     let mut stage = StageFile::default_for_branch(&snapshot.branch);
     stage.base_changeset_id = snapshot.base_changeset_id.clone();
     save_stage(&stage)?;
+    Ok(())
+}
+
+/// Refuse to overwrite local work when restoring/branching from a checkpoint,
+/// mirroring the pre-flight in `ht checkout`. Bypassed only with `force`.
+fn guard_checkpoint_overwrite(
+    workspace_root: &Path,
+    snapshot: &CheckpointSnapshot,
+    force: bool,
+) -> Result<()> {
+    if force {
+        return Ok(());
+    }
+
+    if let Ok(stage) = load_stage() {
+        if !stage.assets.is_empty() {
+            return Err(anyhow!(
+                "workspace has {} staged change(s); submit them or use --force",
+                stage.assets.len()
+            ));
+        }
+    }
+
+    let existing_workspace = load_workspace().ok();
+    let matching_workspace = existing_workspace.as_ref().filter(|workspace| {
+        workspace.repo_id == snapshot.repo_id
+            && Path::new(&workspace.workspace_root) == workspace_root
+    });
+
+    let mut tracked_paths = std::collections::HashSet::new();
+    if let Some(workspace) = matching_workspace {
+        let conflicts = detect_local_modifications(workspace)?;
+        if !conflicts.is_empty() {
+            eprintln!(
+                "error: workspace has {} uncommitted modification(s), restore would overwrite:",
+                conflicts.len()
+            );
+            for conflict in &conflicts {
+                eprintln!("  {}", conflict.path);
+            }
+            eprintln!("commit/submit your changes, or re-run with --force to overwrite.");
+            return Err(anyhow!(
+                "checkpoint restore refused to overwrite local changes"
+            ));
+        }
+        tracked_paths.extend(
+            workspace
+                .checked_out_assets
+                .iter()
+                .map(|asset| asset.path.as_str()),
+        );
+    }
+
+    for asset in &snapshot.assets {
+        if tracked_paths.contains(asset.path.as_str()) {
+            continue;
+        }
+        let target = resolve_workspace_target(workspace_root, &asset.path)?;
+        if target.exists()
+            && (target.is_dir()
+                || hash_local_asset(workspace_root, &asset.path)?.as_deref()
+                    != Some(asset.blob_hash.as_str()))
+        {
+            return Err(anyhow!(
+                "checkpoint restore would overwrite untracked local file {}; use --force",
+                asset.path
+            ));
+        }
+    }
     Ok(())
 }
 

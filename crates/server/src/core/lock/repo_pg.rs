@@ -48,8 +48,12 @@ impl LockRepoPg {
             .collect())
     }
 
-    pub async fn upsert_lock(&self, lock: &FileLock) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    /// Renew/insert a lock, but never steal one: on conflict the lease is only
+    /// extended when the existing row is still owned by the same principal.
+    /// Returns `false` (0 rows) when a different owner holds the DB lock, so a
+    /// stale in-memory view cannot overwrite the authoritative owner.
+    pub async fn upsert_lock(&self, lock: &FileLock) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
             r#"
             INSERT INTO locks (file_path, owner_id, locked_at, lease_expires_at, force_released, repo_id, scope)
             VALUES ($1, $2, $3, $4, FALSE, $5, $6)
@@ -59,6 +63,7 @@ impl LockRepoPg {
                 locked_at = EXCLUDED.locked_at,
                 lease_expires_at = EXCLUDED.lease_expires_at,
                 force_released = FALSE
+            WHERE locks.owner_id = EXCLUDED.owner_id
             "#,
         )
         .bind(&lock.file_path)
@@ -69,7 +74,7 @@ impl LockRepoPg {
         .bind(&lock.scope)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn acquire_lock_atomic(&self, lock: &FileLock) -> Result<FileLock, sqlx::Error> {
@@ -139,6 +144,7 @@ impl LockRepoPg {
         })
     }
 
+    /// Admin/force release: delete regardless of owner.
     pub async fn delete_lock(
         &self,
         repo_id: &str,
@@ -157,5 +163,31 @@ impl LockRepoPg {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Owner-scoped release used by `unlock`/expired-renew cleanup: only removes
+    /// the lock when it is still owned by `owner_id` in the database. Returns
+    /// `false` when no such row exists (e.g. the lease expired and another
+    /// principal re-acquired it), so we never delete a valid lock we no longer hold.
+    pub async fn delete_lock_owned(
+        &self,
+        repo_id: &str,
+        scope: &str,
+        file_path: &str,
+        owner_id: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM locks
+            WHERE repo_id = $1 AND scope = $2 AND file_path = $3 AND owner_id = $4
+            "#,
+        )
+        .bind(repo_id)
+        .bind(scope)
+        .bind(file_path)
+        .bind(owner_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 }

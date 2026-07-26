@@ -37,6 +37,8 @@ pub(crate) struct CheckpointCreateArgs {
 pub(crate) struct CheckpointRestoreArgs {
     #[arg(long)]
     pub id: String,
+    #[arg(long, help = "Force restore, overwriting local modifications")]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -45,6 +47,8 @@ pub(crate) struct CheckpointBranchArgs {
     pub id: String,
     #[arg(long)]
     pub name: String,
+    #[arg(long, help = "Force materialization, overwriting local modifications")]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -105,7 +109,7 @@ async fn checkpoint_restore(args: CheckpointRestoreArgs) -> Result<()> {
     let mut profile = load_profile()?;
     let client = reqwest::Client::new();
     let snapshot = fetch_checkpoint_snapshot(&client, &mut profile, &args.id).await?;
-    materialize_checkpoint_snapshot(&client, &mut profile, &snapshot).await?;
+    materialize_checkpoint_snapshot(&client, &mut profile, &snapshot, args.force).await?;
     println!(
         "checkpoint restored: checkpoint_id={} session_id={} repo_id={} branch={} asset_count={}",
         snapshot.checkpoint_id,
@@ -140,7 +144,7 @@ async fn checkpoint_branch(args: CheckpointBranchArgs) -> Result<()> {
             "create branch failed"
         )));
     }
-    materialize_checkpoint_snapshot(&client, &mut profile, &snapshot).await?;
+    materialize_checkpoint_snapshot(&client, &mut profile, &snapshot, args.force).await?;
     profile.current_repo = Some(snapshot.repo_id.clone());
     profile.current_branch = args.name.clone();
     save_profile(&profile)?;

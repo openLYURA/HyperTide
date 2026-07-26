@@ -124,11 +124,14 @@ impl AuditChain {
         .await?;
 
         let mut expected_prev = "GENESIS".to_string();
+        // Count verified rows directly rather than deriving from `seq`, which has
+        // gaps whenever a BIGSERIAL value is consumed by a rolled-back append.
+        let mut checked = 0i64;
         for row in &rows {
             if row.prev_hash != expected_prev {
                 return Ok(AuditVerifyResult {
                     valid: false,
-                    checked: row.seq.saturating_sub(1),
+                    checked,
                     broken_at_seq: Some(row.seq),
                     reason: Some("prev_hash mismatch".to_string()),
                 });
@@ -151,18 +154,19 @@ impl AuditChain {
             if row.entry_hash != expected_hash {
                 return Ok(AuditVerifyResult {
                     valid: false,
-                    checked: row.seq.saturating_sub(1),
+                    checked,
                     broken_at_seq: Some(row.seq),
                     reason: Some("entry_hash mismatch".to_string()),
                 });
             }
 
             expected_prev = row.entry_hash.clone();
+            checked += 1;
         }
 
         Ok(AuditVerifyResult {
             valid: true,
-            checked: rows.len() as i64,
+            checked,
             broken_at_seq: None,
             reason: None,
         })

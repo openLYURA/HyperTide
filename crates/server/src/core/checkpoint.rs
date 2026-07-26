@@ -24,6 +24,18 @@ impl CheckpointService {
     }
 
     pub async fn generate_checkpoint(&self) -> Result<CheckpointRecord, sqlx::Error> {
+        // Take a consistent point-in-time snapshot: run every read inside one
+        // REPEATABLE READ transaction and hold the same advisory lock the audit
+        // appender uses, so log_head/log_size and the table counts can't describe
+        // different moments (a TOCTOU that witnesses would then attest).
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(92426001)")
+            .execute(&mut *tx)
+            .await?;
+
         let log_head_hash = sqlx::query_scalar::<_, Option<String>>(
             r#"
             SELECT entry_hash
@@ -32,29 +44,29 @@ impl CheckpointService {
             LIMIT 1
             "#,
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?
         .unwrap_or_else(|| "GENESIS".to_string());
 
         let log_size = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM audit_chain_entries")
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await?;
 
         let locks_count =
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM locks WHERE force_released = FALSE")
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *tx)
                 .await
                 .unwrap_or(0);
         let changesets_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM changesets")
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await
             .unwrap_or(0);
         let manifests_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM manifests")
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await
             .unwrap_or(0);
         let chunks_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chunks")
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await
             .unwrap_or(0);
 
@@ -93,9 +105,10 @@ impl CheckpointService {
         .bind(checkpoint.log_size)
         .bind(&checkpoint.state_root)
         .bind(checkpoint.created_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
+        tx.commit().await?;
         Ok(checkpoint)
     }
 
