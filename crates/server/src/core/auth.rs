@@ -99,14 +99,27 @@ impl AuthIdentity {
     }
 }
 
+const DEFAULT_KEY_CACHE_TTL_SECS: i64 = 60;
+
+/// A cached API key together with the instant it was cached. Cache entries expire
+/// after `key_cache_ttl_secs` so that a revocation or permission change made in the
+/// database (possibly by another instance) is picked up within the TTL instead of
+/// being trusted forever.
+#[derive(Clone)]
+struct CachedKey {
+    api_key: ApiKey,
+    cached_at: DateTime<Utc>,
+}
+
 #[derive(Clone)]
 pub struct AuthManager {
-    keys: Arc<DashMap<String, ApiKey>>,
+    keys: Arc<DashMap<String, CachedKey>>,
     dev_master_key: Option<String>,
     repo: Option<AuthRepo>,
     token_service: Option<TokenService>,
     access_token_ttl_secs: i64,
     refresh_token_ttl_secs: i64,
+    key_cache_ttl_secs: i64,
 }
 
 impl AuthManager {
@@ -118,6 +131,7 @@ impl AuthManager {
             token_service: None,
             access_token_ttl_secs: 15 * 60,
             refresh_token_ttl_secs: 7 * 24 * 60 * 60,
+            key_cache_ttl_secs: DEFAULT_KEY_CACHE_TTL_SECS,
         }
     }
 
@@ -130,6 +144,7 @@ impl AuthManager {
             token_service: None,
             access_token_ttl_secs: 15 * 60,
             refresh_token_ttl_secs: 7 * 24 * 60 * 60,
+            key_cache_ttl_secs: DEFAULT_KEY_CACHE_TTL_SECS,
         };
 
         let dev_api_key = ApiKey {
@@ -145,7 +160,7 @@ impl AuthManager {
             expires_at: None,
             revoked: false,
         };
-        manager.keys.insert(dev_api_key.key.clone(), dev_api_key);
+        manager.cache_key(dev_api_key);
 
         manager
     }
@@ -167,6 +182,11 @@ impl AuthManager {
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(7 * 24 * 60 * 60);
+        manager.key_cache_ttl_secs = std::env::var("API_KEY_CACHE_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|secs| *secs >= 0)
+            .unwrap_or(DEFAULT_KEY_CACHE_TTL_SECS);
 
         if let Some(master) = manager.dev_master_key.clone() {
             repo.upsert_api_key(
@@ -189,10 +209,26 @@ impl AuthManager {
         Ok(manager)
     }
 
+    fn cache_key(&self, api_key: ApiKey) {
+        self.keys.insert(
+            api_key.key.clone(),
+            CachedKey {
+                api_key,
+                cached_at: Utc::now(),
+            },
+        );
+    }
+
+    fn cache_entry_fresh(&self, cached_at: DateTime<Utc>) -> bool {
+        Utc::now() < cached_at + Duration::seconds(self.key_cache_ttl_secs.max(0))
+    }
+
     pub fn validate_key(&self, key: &str) -> Option<ApiKey> {
-        self.keys.get(key).and_then(|api_key| {
-            if api_key.is_valid() {
-                Some(api_key.clone())
+        self.keys.get(key).and_then(|entry| {
+            // A stale entry is treated as a miss so callers with a DB fall through
+            // (validate_key_any) re-check the authoritative record.
+            if self.cache_entry_fresh(entry.cached_at) && entry.api_key.is_valid() {
+                Some(entry.api_key.clone())
             } else {
                 None
             }
@@ -223,13 +259,13 @@ impl AuthManager {
             revoked: false,
         };
 
-        self.keys.insert(key, api_key.clone());
+        self.cache_key(api_key.clone());
         api_key
     }
 
     pub fn revoke_key(&self, key: &str) -> bool {
-        if let Some(mut api_key) = self.keys.get_mut(key) {
-            api_key.revoked = true;
+        if let Some(mut entry) = self.keys.get_mut(key) {
+            entry.api_key.revoked = true;
             true
         } else {
             false
@@ -237,7 +273,10 @@ impl AuthManager {
     }
 
     pub fn list_keys(&self) -> Vec<ApiKey> {
-        self.keys.iter().map(|kv| kv.value().clone()).collect()
+        self.keys
+            .iter()
+            .map(|kv| kv.value().api_key.clone())
+            .collect()
     }
 
     pub async fn validate_key_any(&self, key: &str) -> Option<ApiKey> {
@@ -263,9 +302,12 @@ impl AuthManager {
             revoked: stored.revoked,
         };
         if api_key.is_valid() {
-            self.keys.insert(key.to_string(), api_key.clone());
+            self.cache_key(api_key.clone());
             Some(api_key)
         } else {
+            // Drop any stale cached copy so a key revoked in the DB stops
+            // authenticating from cache on this instance too.
+            self.keys.remove(key);
             None
         }
     }
@@ -335,23 +377,27 @@ impl AuthManager {
     }
 
     pub async fn list_keys_persistent(&self) -> Result<Vec<ApiKey>, HyperTideError> {
-        let mut keys = self.list_keys();
+        // When a DB is configured it is the authoritative store and holds only
+        // hashed keys. Return those exclusively: merging the in-memory cache here
+        // duplicated persisted keys and, worse, exposed the raw secret bytes of
+        // cached keys (dev master / freshly generated) to `list_keys`.
         if let Some(repo) = &self.repo {
             let stored = repo.list_api_keys().await.map_err(|error| {
                 HyperTideError::Persistence(format!("failed to list api keys: {error}"))
             })?;
-            for (key_hash, row) in stored {
-                keys.push(ApiKey {
+            return Ok(stored
+                .into_iter()
+                .map(|(key_hash, row)| ApiKey {
                     key: key_hash,
                     owner_id: row.owner_id,
                     permissions: row.permissions,
                     created_at: row.created_at,
                     expires_at: row.expires_at,
                     revoked: row.revoked,
-                });
-            }
+                })
+                .collect());
         }
-        Ok(keys)
+        Ok(self.list_keys())
     }
 
     pub async fn exchange_key_for_tokens(
@@ -471,22 +517,26 @@ impl AuthManager {
             )
             .map_err(HyperTideError::Authentication)?;
 
-        repo.insert_refresh_token(
-            &new_refresh_token,
-            &claims.sub,
-            &family_id,
-            Some(refresh_token),
-            Utc::now() + Duration::seconds(self.refresh_token_ttl_secs),
-        )
-        .await
-        .map_err(|error| {
-            HyperTideError::Persistence(format!("failed to persist rotated refresh token: {error}"))
-        })?;
-        repo.mark_refresh_replaced(refresh_token, &new_refresh_token)
+        let rotated = repo
+            .rotate_refresh_token(
+                refresh_token,
+                &new_refresh_token,
+                &claims.sub,
+                &family_id,
+                Utc::now() + Duration::seconds(self.refresh_token_ttl_secs),
+            )
             .await
             .map_err(|error| {
-                HyperTideError::Persistence(format!("failed to mark refresh rotation: {error}"))
+                HyperTideError::Persistence(format!("failed to rotate refresh token: {error}"))
             })?;
+        if !rotated {
+            // The token was claimed by a concurrent refresh or revoked between our
+            // read above and this atomic claim: treat as replay and burn the family.
+            let _ = repo.revoke_refresh_family(&stored.family_id).await;
+            return Err(HyperTideError::Authentication(
+                "Refresh token replay detected; family revoked".to_string(),
+            ));
+        }
 
         Ok(TokenPair {
             access_token,
