@@ -117,15 +117,20 @@ impl StorageManager {
         let object_dir = self.storage_root.join("objects").join(prefix);
         let object_path = object_dir.join(rest);
 
-        // Check if already exists (deduplication)
+        // Check if already exists (deduplication). The incoming bytes already hash
+        // to `hash`, so a same-sized object at the CAS path is a dedup hit; trust
+        // the content-addressed layout instead of reading the whole existing object
+        // back into memory and re-hashing it (that doubled transient memory on every
+        // dedup hit). Object integrity is still re-verified on `retrieve`.
         if Self::check_path_exists(&object_path, "object existence before store")
             .await
             .map_err(HyperTideError::Persistence)?
         {
-            let existing = fs::read(&object_path).await.map_err(|error| {
-                HyperTideError::Persistence(format!("Failed to verify existing object: {error}"))
-            })?;
-            if Self::calculate_hash(&existing) == hash {
+            let same_size = match fs::metadata(&object_path).await {
+                Ok(metadata) => metadata.len() == size_bytes,
+                Err(_) => false,
+            };
+            if same_size {
                 return Ok(StoredFile {
                     hash,
                     original_path: original_path.to_string(),
@@ -133,11 +138,15 @@ impl StorageManager {
                     stored_at: chrono::Utc::now(),
                 });
             }
-            fs::remove_file(&object_path).await.map_err(|error| {
-                HyperTideError::Persistence(format!(
-                    "Failed to replace corrupt CAS object {hash}: {error}"
-                ))
-            })?;
+            // Size mismatch (or unreadable metadata): the object is corrupt for this
+            // hash; drop it and rewrite. Tolerate a concurrent removal.
+            if let Err(error) = fs::remove_file(&object_path).await {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(HyperTideError::Persistence(format!(
+                        "Failed to replace corrupt CAS object {hash}: {error}"
+                    )));
+                }
+            }
         }
 
         // Create subdirectory if needed
