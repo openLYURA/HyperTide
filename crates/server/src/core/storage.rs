@@ -45,6 +45,21 @@ impl StorageManager {
             .map_err(|e| format!("Failed to check {}: {}", context, e))
     }
 
+    async fn check_regular_object(path: &Path, context: &str) -> Result<bool, String> {
+        let metadata = match fs::symlink_metadata(path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(format!("Failed to check {context}: {error}")),
+        };
+        if !metadata.file_type().is_file() {
+            return Err(format!(
+                "CAS object path is not a regular file: {}",
+                path.display()
+            ));
+        }
+        Ok(true)
+    }
+
     /// Create a new storage manager with the given root directory
     pub fn new(storage_root: impl AsRef<Path>) -> Self {
         Self {
@@ -126,7 +141,7 @@ impl StorageManager {
     pub async fn retrieve(&self, hash: &str) -> Result<Vec<u8>, HyperTideError> {
         let object_path = self.object_path(hash)?;
 
-        if !Self::check_path_exists(&object_path, "object existence before retrieve")
+        if !Self::check_regular_object(&object_path, "object existence before retrieve")
             .await
             .map_err(HyperTideError::Persistence)?
         {
@@ -151,7 +166,7 @@ impl StorageManager {
     /// Check if a file with given hash exists
     pub async fn exists(&self, hash: &str) -> Result<bool, String> {
         let object_path = self.object_path(hash).map_err(|error| error.to_string())?;
-        Self::check_path_exists(&object_path, "object existence").await
+        Self::check_regular_object(&object_path, "object existence").await
     }
 
     /// Get the local file path for a hash (for direct access)
@@ -334,6 +349,38 @@ mod tests {
         assert!(manager.exists("../outside-file").await.is_err());
         assert!(manager.get_path("../outside-file").is_none());
 
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exists_and_retrieve_reject_fifo_object_entries() {
+        let root = make_storage_root("fifo-object");
+        let manager = StorageManager::new(&root);
+        manager.init().await.expect("init storage");
+        let hash = StorageManager::calculate_hash(b"expected");
+        let object_path = manager.get_path(&hash).expect("valid object path");
+        std::fs::create_dir_all(object_path.parent().expect("object parent"))
+            .expect("create object parent");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&object_path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo should succeed");
+
+        let exists_error = manager
+            .exists(&hash)
+            .await
+            .expect_err("FIFO must be a storage inconsistency");
+        assert!(exists_error.contains("not a regular file"));
+
+        let retrieve_error = manager
+            .retrieve(&hash)
+            .await
+            .expect_err("FIFO must be rejected before reading");
+        assert!(retrieve_error.to_string().contains("not a regular file"));
+
+        std::fs::remove_file(object_path).ok();
         std::fs::remove_dir_all(root).ok();
     }
 
