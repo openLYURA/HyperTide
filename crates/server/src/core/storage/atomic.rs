@@ -48,6 +48,22 @@ async fn matches_existing(
     Ok(hasher.finalize().to_hex().as_str() == hash)
 }
 
+#[cfg(windows)]
+async fn publish_staged(temp_path: &Path, object_path: &Path) -> std::io::Result<()> {
+    let source = temp_path.to_path_buf();
+    let destination = object_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        crate::core::file_replace::replace_file(&source, &destination)
+    })
+    .await
+    .map_err(|error| std::io::Error::other(format!("CAS publish task failed: {error}")))?
+}
+
+#[cfg(not(windows))]
+async fn publish_staged(temp_path: &Path, object_path: &Path) -> std::io::Result<()> {
+    fs::rename(temp_path, object_path).await
+}
+
 pub(super) async fn store(root: &Path, hash: &str, data: &[u8]) -> Result<(), HyperTideError> {
     // The caller supplies the BLAKE3 digest calculated from data.
     let (prefix, rest) = hash.split_at(2);
@@ -92,7 +108,7 @@ pub(super) async fn store(root: &Path, hash: &str, data: &[u8]) -> Result<(), Hy
 
     let result = match write_result {
         Err(error) => Err(error),
-        Ok(()) => match fs::rename(&temp_path, &object_path).await {
+        Ok(()) => match publish_staged(&temp_path, &object_path).await {
             Ok(()) => Ok(()),
             Err(rename_error) => {
                 // A destination's mere existence does not prove a racing writer
@@ -193,6 +209,25 @@ mod tests {
         let data = b"expected";
         let hash = StorageManager::calculate_hash(data);
         storage.seed_object(&hash, b"corrupt!").await;
+
+        storage
+            .manager
+            .store(data, "asset.bin")
+            .await
+            .expect("repair");
+
+        assert_eq!(
+            storage.manager.retrieve(&hash).await.expect("retrieve"),
+            data
+        );
+    }
+
+    #[tokio::test]
+    async fn store_repairs_wrong_size_corruption() {
+        let storage = TestStorage::new().await;
+        let data = b"expected replacement";
+        let hash = StorageManager::calculate_hash(data);
+        storage.seed_object(&hash, b"short").await;
 
         storage
             .manager

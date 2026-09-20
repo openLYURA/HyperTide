@@ -67,6 +67,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
 
+  windows-cas:
+    name: Windows CAS Repair
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test atomic CAS publication and repair
+        run: cargo test -p hypertide-server core::storage::atomic::tests::
+
   runtime-smoke:
     name: Runtime Smoke
     runs-on: ubuntu-latest

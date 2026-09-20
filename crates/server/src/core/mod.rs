@@ -5,6 +5,7 @@ pub mod compliance;
 pub mod config;
 pub mod db;
 pub mod error;
+pub(crate) mod file_replace;
 pub mod events;
 pub mod high_risk;
 pub mod lock;
