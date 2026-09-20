@@ -57,9 +57,9 @@ async fn find_missing_chunks(
 ) -> Result<Vec<String>, String> {
     let mut missing = Vec::new();
     for hash in hashes {
-        if indexed.is_some_and(|existing| !existing.contains(&hash))
-            || !storage.exists(&hash).await?
-        {
+        let stored = storage.exists(&hash).await?;
+        let indexed = indexed.is_none_or(|existing| existing.contains(&hash));
+        if !indexed || !stored {
             missing.push(hash);
         }
     }
@@ -324,14 +324,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn storage_errors_are_not_reported_as_missing_chunks() {
+    async fn storage_errors_propagate_even_when_chunk_is_unindexed() {
         let storage = TestStorage::new().await;
         let invalid = "not-a-hash".to_string();
-        let indexed = HashSet::from([invalid.clone()]);
+        let indexed = HashSet::new();
 
         let error = find_missing_chunks(&storage.manager, vec![invalid], Some(&indexed))
             .await
-            .expect_err("storage errors must propagate");
+            .expect_err("storage errors must propagate before reporting a missing chunk");
 
         assert!(error.contains("Invalid BLAKE3 hash"));
     }

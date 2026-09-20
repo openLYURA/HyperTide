@@ -13,8 +13,11 @@ async fn matches_existing(
     hash: &str,
     size_bytes: u64,
 ) -> Result<bool, HyperTideError> {
-    let mut file = match fs::File::open(object_path).await {
-        Ok(file) => file,
+    // Inspect the directory entry before opening it. Opening a FIFO for reading
+    // can block indefinitely on Unix, and following a symlink would escape the
+    // CAS object's expected file type before we have a chance to reject it.
+    let metadata = match fs::symlink_metadata(object_path).await {
+        Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => {
             return Err(HyperTideError::Persistence(format!(
@@ -22,15 +25,29 @@ async fn matches_existing(
             )));
         }
     };
-    let metadata = file.metadata().await.map_err(|error| {
-        HyperTideError::Persistence(format!("Failed to inspect existing CAS object: {error}"))
-    })?;
-    if !metadata.is_file() {
+    if !metadata.file_type().is_file() {
         return Err(HyperTideError::Persistence(
             "CAS object path is not a regular file".to_string(),
         ));
     }
     if metadata.len() != size_bytes {
+        return Ok(false);
+    }
+
+    let mut file = fs::File::open(object_path).await.map_err(|error| {
+        HyperTideError::Persistence(format!("Failed to open existing CAS object: {error}"))
+    })?;
+    // Re-check the opened handle so a regular-file replacement between the
+    // directory-entry inspection and open is detected before hashing.
+    let opened_metadata = file.metadata().await.map_err(|error| {
+        HyperTideError::Persistence(format!("Failed to inspect existing CAS object: {error}"))
+    })?;
+    if !opened_metadata.is_file() {
+        return Err(HyperTideError::Persistence(
+            "CAS object path is not a regular file".to_string(),
+        ));
+    }
+    if opened_metadata.len() != size_bytes {
         return Ok(false);
     }
 
@@ -271,6 +288,29 @@ mod tests {
 
         assert!(storage.manager.store(data, "asset.bin").await.is_err());
         assert!(object.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fifo_object_path_is_rejected_before_read_open() {
+        let storage = TestStorage::new().await;
+        let data = b"expected";
+        let hash = StorageManager::calculate_hash(data);
+        let object = storage.manager.get_path(&hash).expect("valid hash");
+        fs::create_dir_all(object.parent().expect("object parent"))
+            .await
+            .expect("create object parent");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&object)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo should succeed");
+
+        let error = matches_existing(&object, &hash, data.len() as u64)
+            .await
+            .expect_err("FIFO must be rejected without opening for a blocking read");
+
+        assert!(error.to_string().contains("not a regular file"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
