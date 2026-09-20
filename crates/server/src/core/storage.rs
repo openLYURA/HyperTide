@@ -39,12 +39,6 @@ impl StorageManager {
         Ok(self.storage_root.join("objects").join(prefix).join(rest))
     }
 
-    async fn check_path_exists(path: &Path, context: &str) -> Result<bool, String> {
-        fs::try_exists(path)
-            .await
-            .map_err(|e| format!("Failed to check {}: {}", context, e))
-    }
-
     async fn check_regular_object(path: &Path, context: &str) -> Result<bool, String> {
         let metadata = match fs::symlink_metadata(path).await {
             Ok(metadata) => metadata,
