@@ -47,6 +47,25 @@ async fn require_download_permission(
         .map(|_| ())
 }
 
+/// Both metadata and content must exist before the client can skip an upload.
+/// Storage failures are not absence: propagate them instead of requesting a retry
+/// that cannot repair an inaccessible storage volume.
+async fn find_missing_chunks(
+    storage: &StorageManager,
+    hashes: Vec<String>,
+    indexed: Option<&HashSet<String>>,
+) -> Result<Vec<String>, String> {
+    let mut missing = Vec::new();
+    for hash in hashes {
+        if indexed.is_some_and(|existing| !existing.contains(&hash))
+            || !storage.exists(&hash).await?
+        {
+            missing.push(hash);
+        }
+    }
+    Ok(missing)
+}
+
 pub async fn missing_chunks(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -63,7 +82,7 @@ pub async fn missing_chunks(
         );
     }
 
-    let mut unique_hashes = payload.chunk_hashes.clone();
+    let mut unique_hashes = payload.chunk_hashes;
     unique_hashes.sort();
     unique_hashes.dedup();
     if unique_hashes
@@ -76,7 +95,7 @@ pub async fn missing_chunks(
         );
     }
 
-    let missing = if let Some(pool) = state.db_pool.as_ref() {
+    let indexed = if let Some(pool) = state.db_pool.as_ref() {
         match sqlx::query_scalar::<_, String>(
             r#"
             SELECT chunk_hash
@@ -88,13 +107,7 @@ pub async fn missing_chunks(
         .fetch_all(pool)
         .await
         {
-            Ok(existing) => {
-                let existing_set: HashSet<String> = existing.into_iter().collect();
-                unique_hashes
-                    .into_iter()
-                    .filter(|hash| !existing_set.contains(hash))
-                    .collect::<Vec<_>>()
-            }
+            Ok(existing) => Some(existing.into_iter().collect::<HashSet<_>>()),
             Err(error) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -105,22 +118,24 @@ pub async fn missing_chunks(
             }
         }
     } else {
-        let mut missing = Vec::new();
-        for hash in unique_hashes {
-            match state.storage_manager.exists(&hash).await {
-                Ok(true) => {}
-                Ok(false) => missing.push(hash),
-                Err(error) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ApiResponse::err(format!(
-                            "failed to check chunk existence: {error}"
-                        ))),
-                    );
-                }
-            }
+        None
+    };
+    let missing = match find_missing_chunks(
+        &state.storage_manager,
+        unique_hashes,
+        indexed.as_ref(),
+    )
+    .await
+    {
+        Ok(missing) => missing,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::err(format!(
+                    "failed to check chunk existence: {error}"
+                ))),
+            );
         }
-        missing
     };
 
     (
@@ -209,4 +224,111 @@ pub async fn upload_chunk(
             uploaded: !existed,
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    struct TestStorage {
+        root: PathBuf,
+        manager: StorageManager,
+    }
+
+    impl TestStorage {
+        async fn new() -> Self {
+            let root = std::env::temp_dir()
+                .join(format!("hypertide-missing-chunks-{}", uuid::Uuid::new_v4()));
+            let manager = StorageManager::new(&root);
+            manager.init().await.expect("init storage");
+            Self { root, manager }
+        }
+    }
+
+    impl Drop for TestStorage {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[tokio::test]
+    async fn indexed_but_deleted_chunk_is_requested_again() {
+        let storage = TestStorage::new().await;
+        let stored = storage.manager.store(b"chunk", "chunk").await.expect("store");
+        let indexed = HashSet::from([stored.hash.clone()]);
+        let object = storage.manager.get_path(&stored.hash).expect("object path");
+        tokio::fs::remove_file(object).await.expect("simulate lost object");
+
+        let missing = find_missing_chunks(
+            &storage.manager,
+            vec![stored.hash.clone()],
+            Some(&indexed),
+        )
+        .await
+        .expect("find missing chunks");
+
+        assert_eq!(missing, vec![stored.hash]);
+    }
+
+    #[tokio::test]
+    async fn unindexed_chunk_is_requested_even_when_content_exists() {
+        let storage = TestStorage::new().await;
+        let stored = storage.manager.store(b"chunk", "chunk").await.expect("store");
+        let indexed = HashSet::new();
+
+        let missing = find_missing_chunks(
+            &storage.manager,
+            vec![stored.hash.clone()],
+            Some(&indexed),
+        )
+        .await
+        .expect("find missing chunks");
+
+        assert_eq!(missing, vec![stored.hash]);
+    }
+
+    #[tokio::test]
+    async fn intact_indexed_chunks_do_not_need_retransmission() {
+        let storage = TestStorage::new().await;
+        let stored = storage.manager.store(b"chunk", "chunk").await.expect("store");
+        let indexed = HashSet::from([stored.hash.clone()]);
+
+        let missing = find_missing_chunks(&storage.manager, vec![stored.hash], Some(&indexed))
+            .await
+            .expect("find missing chunks");
+
+        assert!(missing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn without_a_database_presence_is_checked_in_storage() {
+        let storage = TestStorage::new().await;
+        let stored = storage.manager.store(b"chunk", "chunk").await.expect("store");
+        let absent = StorageManager::calculate_hash(b"not uploaded");
+
+        let missing = find_missing_chunks(
+            &storage.manager,
+            vec![stored.hash, absent.clone()],
+            None,
+        )
+        .await
+        .expect("find missing chunks");
+
+        assert_eq!(missing, vec![absent]);
+    }
+
+    #[tokio::test]
+    async fn storage_errors_are_not_reported_as_missing_chunks() {
+        let storage = TestStorage::new().await;
+        let invalid = "not-a-hash".to_string();
+        let indexed = HashSet::from([invalid.clone()]);
+
+        let error = find_missing_chunks(&storage.manager, vec![invalid], Some(&indexed))
+            .await
+            .expect_err("storage errors must propagate");
+
+        assert!(error.contains("Invalid BLAKE3 hash"));
+    }
 }
