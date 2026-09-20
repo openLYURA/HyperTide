@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use sqlx::{FromRow, PgPool};
 
 use crate::core::versioning::{
@@ -11,12 +13,17 @@ use crate::core::versioning::{
 #[derive(Clone)]
 pub struct VersionRepoPg {
     pool: PgPool,
+    /// Per-repo `state_version` last observed by this process. Used as the expected
+    /// value in the optimistic-concurrency guard so a concurrent writer's update is
+    /// detected instead of silently overwritten.
+    versions: Arc<DashMap<String, i64>>,
 }
 
 #[derive(Debug, FromRow)]
 struct RepoRow {
     repo_id: String,
     created_by: String,
+    state_version: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -75,7 +82,10 @@ struct SnapshotRow {
 
 impl VersionRepoPg {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            versions: Arc::new(DashMap::new()),
+        }
     }
 
     pub(super) async fn load_repos(&self) -> Result<HashMap<String, RepoState>, sqlx::Error> {
@@ -83,7 +93,7 @@ impl VersionRepoPg {
 
         let repo_rows = sqlx::query_as::<_, RepoRow>(
             r#"
-            SELECT repo_id, created_by
+            SELECT repo_id, created_by, state_version
             FROM repos
             ORDER BY created_at ASC
             "#,
@@ -92,6 +102,8 @@ impl VersionRepoPg {
         .await?;
 
         for repo_row in repo_rows {
+            self.versions
+                .insert(repo_row.repo_id.clone(), repo_row.state_version);
             let mut repo = RepoState {
                 default_branch: "main".to_string(),
                 branches: HashMap::new(),
@@ -269,17 +281,57 @@ impl VersionRepoPg {
             })
             .unwrap_or("system");
 
-        sqlx::query(
-            r#"
-            INSERT INTO repos (repo_id, created_by)
-            VALUES ($1, $2)
-            ON CONFLICT (repo_id) DO UPDATE SET created_by = EXCLUDED.created_by
-            "#,
-        )
-        .bind(repo_id)
-        .bind(created_by)
-        .execute(&mut *tx)
-        .await?;
+        // Optimistic-concurrency guard. `expected` is the version this process last
+        // observed for the repo; the guarded write only succeeds if the DB still
+        // holds that version, so a concurrent writer (e.g. another instance) that
+        // advanced the repo is detected here instead of being silently clobbered.
+        let expected_version = self.versions.get(repo_id).map(|entry| *entry);
+        let new_version = match expected_version {
+            Some(expected) => {
+                let updated = sqlx::query(
+                    r#"
+                    UPDATE repos
+                    SET created_by = $2, state_version = state_version + 1
+                    WHERE repo_id = $1 AND state_version = $3
+                    "#,
+                )
+                .bind(repo_id)
+                .bind(created_by)
+                .bind(expected)
+                .execute(&mut *tx)
+                .await?;
+                if updated.rows_affected() == 0 {
+                    tx.rollback().await?;
+                    return Err(sqlx::Error::Protocol(format!(
+                        "concurrent modification of repo {repo_id}: expected state_version {expected}"
+                    )));
+                }
+                expected + 1
+            }
+            None => {
+                let inserted = sqlx::query(
+                    r#"
+                    INSERT INTO repos (repo_id, created_by, state_version)
+                    VALUES ($1, $2, 0)
+                    ON CONFLICT (repo_id) DO NOTHING
+                    "#,
+                )
+                .bind(repo_id)
+                .bind(created_by)
+                .execute(&mut *tx)
+                .await?;
+                if inserted.rows_affected() == 0 {
+                    // The repo already exists in the DB but this process never loaded
+                    // or persisted it: another writer owns it. Refuse rather than
+                    // overwrite an unknown state.
+                    tx.rollback().await?;
+                    return Err(sqlx::Error::Protocol(format!(
+                        "concurrent creation of repo {repo_id} by another writer"
+                    )));
+                }
+                0
+            }
+        };
 
         sqlx::query("DELETE FROM branches WHERE repo_id = $1")
             .bind(repo_id)
@@ -344,6 +396,14 @@ impl VersionRepoPg {
         }
 
         for (changeset_id, snapshot) in &repo.snapshots {
+            // Persist each snapshot under the branch its changeset actually belongs
+            // to. Binding the default branch unconditionally mislabeled every
+            // non-default-branch snapshot (the table is keyed by branch_name).
+            let branch_name = repo
+                .changesets
+                .get(changeset_id)
+                .map(|changeset| changeset.branch.as_str())
+                .unwrap_or(repo.default_branch.as_str());
             for (asset_id, snapshot_asset) in snapshot {
                 sqlx::query(
                     r#"
@@ -352,7 +412,7 @@ impl VersionRepoPg {
                     "#,
                 )
                 .bind(repo_id)
-                .bind(&repo.default_branch)
+                .bind(branch_name)
                 .bind(changeset_id)
                 .bind(asset_id)
                 .bind(&snapshot_asset.path)
@@ -380,6 +440,7 @@ impl VersionRepoPg {
         }
 
         tx.commit().await?;
+        self.versions.insert(repo_id.to_string(), new_version);
         Ok(())
     }
 }

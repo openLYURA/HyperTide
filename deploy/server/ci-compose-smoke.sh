@@ -36,6 +36,8 @@ cat > "$SCRIPT_DIR/keys/witness-config.json" <<JSON
 JSON
 chmod 0644 "$SCRIPT_DIR/keys/jwt-private.pem" "$SCRIPT_DIR/keys/jwt-public.pem" "$SCRIPT_DIR/keys/witness-config.json"
 
+# CI calls the published application port directly and does not run Caddy.
+# Keep production validation enabled without trusting arbitrary proxy networks.
 cat > "$SCRIPT_DIR/.env.production" <<ENV
 APP_ENV=production
 RUST_LOG=info,tower_http=info
@@ -52,6 +54,7 @@ HIGH_RISK_SIGNATURE_REQUIRED=true
 HIGH_RISK_SIGNING_SECRET=ci-high-risk-signing-secret-32-plus
 WITNESS_CONFIG_FILE=/app/keys/witness-config.json
 CORS_ALLOWED_ORIGINS=https://hypertide-ci.example.com
+TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
 RATE_LIMIT_REQUESTS_PER_MINUTE=600
 STORAGE_PATH=/app/storage
 HYPERTIDE_VERSION=ci

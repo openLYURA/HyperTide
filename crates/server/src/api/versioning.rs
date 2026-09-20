@@ -195,6 +195,16 @@ fn map_versioning_error(error: VersioningError) -> (StatusCode, String) {
             StatusCode::BAD_REQUEST,
             format!("Invalid asset layout for {repo_id}: {message}"),
         ),
+        VersioningError::SelfApprovalForbidden {
+            repo_id,
+            changeset_id,
+            actor,
+        } => (
+            StatusCode::FORBIDDEN,
+            format!(
+                "Separation of duties: {actor} cannot approve/promote their own changeset {repo_id}/{changeset_id}"
+            ),
+        ),
         VersioningError::Persistence { message } => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Versioning persistence failed: {message}"),

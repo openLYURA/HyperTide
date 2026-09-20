@@ -85,13 +85,13 @@ impl ReplayAccumulator {
             "LOCK_ACQUIRED" => {
                 self.summary.lock_acquired += 1;
                 if let Some(path) = extract_file_path(payload) {
-                    self.current_locks.insert(path.to_string());
+                    self.current_locks.insert(lock_key(repo_id, path));
                 }
             }
             "LOCK_RELEASED" | "LOCK_FORCE_RELEASED" => {
                 self.summary.lock_released += 1;
                 if let Some(path) = extract_file_path(payload) {
-                    self.current_locks.remove(path);
+                    self.current_locks.remove(&lock_key(repo_id, path));
                 }
             }
             "CHANGESET_VISIBLE" | "ROLLBACK_VISIBLE" => {
@@ -139,6 +139,13 @@ fn extract_file_path(payload: Option<&Value>) -> Option<&str> {
     payload?.get("file_path")?.as_str()
 }
 
+/// Key locks by `(repo_id, file_path)` to mirror the DB's uniqueness. Keying by
+/// path alone collapsed identical paths across repos into one replay entry,
+/// producing a false mismatch against `SELECT COUNT(*) FROM locks`.
+fn lock_key(repo_id: Option<&str>, path: &str) -> String {
+    format!("{}::{}", repo_id.unwrap_or(""), path)
+}
+
 fn extract_branch(payload: Option<&Value>) -> Option<&str> {
     payload?.get("branch")?.as_str()
 }
@@ -181,22 +188,24 @@ impl ReplayService {
         &self,
         from_checkpoint: Option<&str>,
     ) -> Result<ReplayVerification, sqlx::Error> {
-        let start_seq = if let Some(cp_id) = from_checkpoint {
+        // Always replay from the beginning. `replay_checkpoints` records only an
+        // `event_seq` marker with no accumulated state snapshot, so replaying just
+        // the suffix after a checkpoint into a fresh accumulator cannot reproduce
+        // full state and would report spurious mismatches against the absolute DB
+        // counts below. We still validate the checkpoint exists to preserve the
+        // API contract, but a correct result requires a full scan.
+        if let Some(cp_id) = from_checkpoint {
             let seq: Option<i64> = sqlx::query_scalar(
                 "SELECT event_seq FROM replay_checkpoints WHERE checkpoint_id = $1",
             )
             .bind(cp_id)
             .fetch_optional(&self.pool)
             .await?;
-            match seq {
-                Some(s) => s,
-                None => {
-                    return Err(sqlx::Error::RowNotFound);
-                }
+            if seq.is_none() {
+                return Err(sqlx::Error::RowNotFound);
             }
-        } else {
-            0
-        };
+        }
+        let start_seq = 0i64;
 
         let events = sqlx::query_as::<_, EventRow>(
             r#"

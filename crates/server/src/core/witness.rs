@@ -211,6 +211,38 @@ impl WitnessService {
         })
     }
 
+    /// Recompute a receipt's HMAC over the referenced checkpoint material and
+    /// verify it in constant time. Returns false for receipts from unconfigured
+    /// witnesses or with a malformed/invalid signature, so forged rows cannot count.
+    fn verify_receipt_signature(
+        &self,
+        checkpoint: &CheckpointRecord,
+        receipt: &WitnessReceipt,
+    ) -> bool {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+
+        let Some(witness) = self.witnesses.iter().find(|w| w.id == receipt.witness_id) else {
+            return false;
+        };
+        let Ok(provided) = hex::decode(&receipt.signature) else {
+            return false;
+        };
+        let material = format!(
+            "{}|{}|{}|{}",
+            checkpoint.checkpoint_id,
+            checkpoint.log_head_hash,
+            checkpoint.log_size,
+            checkpoint.state_root
+        );
+        let Ok(mut mac) = HmacSha256::new_from_slice(witness.secret.as_bytes()) else {
+            return false;
+        };
+        mac.update(material.as_bytes());
+        mac.verify_slice(&provided).is_ok()
+    }
+
     pub async fn summary(&self, checkpoint_id: &str) -> Result<WitnessSummary, String> {
         let receipts = sqlx::query_as::<_, WitnessReceipt>(
             r#"
@@ -225,25 +257,49 @@ impl WitnessService {
         .await
         .map_err(|error| format!("failed to query witness receipts: {error}"))?;
 
+        // Quorum must be established by cryptographically verified receipts from
+        // configured witnesses, not by counting rows: a DB-write attacker could
+        // otherwise insert junk receipts to fake a quorum. Fetch the referenced
+        // checkpoint and re-verify each receipt's signature against its material.
+        let checkpoint = sqlx::query_as::<_, CheckpointRecord>(
+            r#"
+            SELECT checkpoint_id, log_head_hash, log_size, state_root, created_at
+            FROM trust_checkpoints
+            WHERE checkpoint_id = $1
+            "#,
+        )
+        .bind(checkpoint_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("failed to query checkpoint: {error}"))?;
+
+        let mut verified_witnesses = HashSet::new();
         let mut scopes = HashSet::new();
-        for receipt in &receipts {
-            if let Some(scope) = self
-                .witnesses
-                .iter()
-                .find(|w| w.id == receipt.witness_id)
-                .map(|w| w.scope.clone())
-            {
-                scopes.insert(scope);
+        if let Some(checkpoint) = &checkpoint {
+            for receipt in &receipts {
+                if !self.verify_receipt_signature(checkpoint, receipt) {
+                    continue;
+                }
+                verified_witnesses.insert(receipt.witness_id.clone());
+                if let Some(scope) = self
+                    .witnesses
+                    .iter()
+                    .find(|w| w.id == receipt.witness_id)
+                    .map(|w| w.scope.clone())
+                {
+                    scopes.insert(scope);
+                }
             }
         }
         let mut distinct_scopes = scopes.into_iter().collect::<Vec<_>>();
         distinct_scopes.sort();
 
+        let quorum_met = verified_witnesses.len() >= self.quorum;
         Ok(WitnessSummary {
             checkpoint_id: checkpoint_id.to_string(),
             quorum: self.quorum,
-            quorum_met: receipts.len() >= self.quorum,
-            cross_scope_quorum_met: receipts.len() >= self.quorum && distinct_scopes.len() >= 2,
+            quorum_met,
+            cross_scope_quorum_met: quorum_met && distinct_scopes.len() >= 2,
             distinct_scopes,
             receipts,
         })

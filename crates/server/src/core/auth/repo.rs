@@ -251,25 +251,60 @@ impl AuthRepo {
         }))
     }
 
-    pub async fn mark_refresh_replaced(
+    /// Atomically claim `old_refresh_token` and persist its replacement in a single
+    /// transaction. Returns `Ok(false)` when the old token was already rotated or
+    /// revoked (a concurrent or replayed refresh), in which case nothing is written.
+    /// The conditional `UPDATE` is the serialization point: of two concurrent
+    /// refreshes of the same token, exactly one flips `replaced_by_token_hash` from
+    /// NULL and proceeds; the other matches zero rows and is rejected as replay.
+    pub async fn rotate_refresh_token(
         &self,
         old_refresh_token: &str,
         new_refresh_token: &str,
+        principal_id: &str,
+        family_id: &str,
+        expires_at: DateTime<Utc>,
     ) -> Result<bool, sqlx::Error> {
         let old_hash = self.hash_secret(old_refresh_token);
         let new_hash = self.hash_secret(new_refresh_token);
-        let result = sqlx::query(
+
+        let mut tx = self.pool.begin().await?;
+
+        let claimed = sqlx::query(
             r#"
             UPDATE refresh_tokens
             SET replaced_by_token_hash = $2
             WHERE token_hash = $1
+              AND replaced_by_token_hash IS NULL
+              AND revoked_at IS NULL
             "#,
         )
-        .bind(old_hash)
-        .bind(new_hash)
-        .execute(&self.pool)
+        .bind(&old_hash)
+        .bind(&new_hash)
+        .execute(&mut *tx)
         .await?;
-        Ok(result.rows_affected() > 0)
+
+        if claimed.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO refresh_tokens (token_hash, principal_id, family_id, parent_token_hash, expires_at)
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(&new_hash)
+        .bind(principal_id)
+        .bind(family_id)
+        .bind(&old_hash)
+        .bind(expires_at)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(true)
     }
 
     pub async fn revoke_refresh_token(&self, refresh_token: &str) -> Result<bool, sqlx::Error> {

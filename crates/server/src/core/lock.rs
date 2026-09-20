@@ -181,11 +181,19 @@ impl LockManager {
         }
         if self.is_expired(&existing) {
             if let Some(repo) = &self.repo {
-                repo.delete_lock(&existing.repo_id, &existing.scope, &existing.file_path)
-                    .await
-                    .map_err(|e| {
-                        HyperTideError::Persistence(format!("failed to cleanup expired lock: {e}"))
-                    })?;
+                // Owner-scoped: if the lease expired and another principal already
+                // re-acquired the lock in the DB, this removes nothing rather than
+                // deleting their valid lock.
+                repo.delete_lock_owned(
+                    &existing.repo_id,
+                    &existing.scope,
+                    &existing.file_path,
+                    &existing.owner_id,
+                )
+                .await
+                .map_err(|e| {
+                    HyperTideError::Persistence(format!("failed to cleanup expired lock: {e}"))
+                })?;
             }
             self.locks.remove(&lock_key);
             return Err(HyperTideError::Conflict(
@@ -199,9 +207,18 @@ impl LockManager {
         };
 
         if let Some(repo) = &self.repo {
-            repo.upsert_lock(&renewed).await.map_err(|e| {
+            let extended = repo.upsert_lock(&renewed).await.map_err(|e| {
                 HyperTideError::Persistence(format!("failed to persist lock renew: {e}"))
             })?;
+            if !extended {
+                // The DB lock is now owned by someone else (e.g. re-acquired after
+                // an expiry our stale cache missed). Drop the stale entry instead of
+                // overwriting their lock.
+                self.locks.remove(&lock_key);
+                return Err(HyperTideError::Conflict(
+                    "Cannot renew: lock is held by another owner".to_string(),
+                ));
+            }
         }
         self.locks.insert(lock_key, renewed.clone());
         Ok(renewed)
@@ -234,9 +251,24 @@ impl LockManager {
         }
 
         if let Some(repo) = &self.repo {
-            repo.delete_lock(&existing.repo_id, &existing.scope, &existing.file_path)
+            let removed = repo
+                .delete_lock_owned(
+                    &existing.repo_id,
+                    &existing.scope,
+                    &existing.file_path,
+                    &existing.owner_id,
+                )
                 .await
                 .map_err(|e| HyperTideError::Persistence(format!("failed to delete lock: {e}")))?;
+            if !removed {
+                // Our cached view said we owned it, but the DB disagrees (lease
+                // expired and someone else re-acquired). Drop the stale entry and
+                // refuse rather than silently succeeding.
+                self.locks.remove(&lock_key);
+                return Err(HyperTideError::Conflict(
+                    "Cannot unlock: lock is no longer held by this owner".to_string(),
+                ));
+            }
         }
 
         self.locks.remove(&lock_key);

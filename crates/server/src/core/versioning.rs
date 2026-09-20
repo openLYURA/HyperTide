@@ -13,46 +13,16 @@ use self::repo_pg::VersionRepoPg;
 
 pub const ROOT_BASE_CHANGESET_ID: &str = "ROOT";
 
-#[cfg(windows)]
-fn replace_state_file(temp_path: &Path, state_path: &Path) -> std::io::Result<()> {
-    use std::iter::once;
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
-
-    if !state_path.exists() {
-        return std::fs::rename(temp_path, state_path);
+/// Returns true when a changeset's `base` is a valid predecessor for the current
+/// branch `head`. Mirrors the acceptance rule in `submit_internal`: an empty head
+/// (no commits yet) accepts the `ROOT` sentinel, otherwise the base must equal the
+/// current head. Used by both promote and the changeset gate so a draft-first
+/// changeset (which never advanced the head) can still be promoted.
+fn head_accepts_base(head: &Option<String>, base: &Option<String>) -> bool {
+    match head {
+        None => base.as_deref() == Some(ROOT_BASE_CHANGESET_ID),
+        Some(_) => head == base,
     }
-
-    let state_wide = state_path
-        .as_os_str()
-        .encode_wide()
-        .chain(once(0))
-        .collect::<Vec<_>>();
-    let temp_wide = temp_path
-        .as_os_str()
-        .encode_wide()
-        .chain(once(0))
-        .collect::<Vec<_>>();
-    let replaced = unsafe {
-        ReplaceFileW(
-            state_wide.as_ptr(),
-            temp_wide.as_ptr(),
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-        )
-    };
-    if replaced == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(windows))]
-fn replace_state_file(temp_path: &Path, state_path: &Path) -> std::io::Result<()> {
-    std::fs::rename(temp_path, state_path)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,9 +266,24 @@ pub enum VersioningError {
         repo_id: String,
         message: String,
     },
+    SelfApprovalForbidden {
+        repo_id: String,
+        changeset_id: String,
+        actor: String,
+    },
     Persistence {
         message: String,
     },
+}
+
+/// Whether approve/promote must be performed by someone other than the changeset
+/// author (four-eyes). Opt-in and off by default so existing single-user flows are
+/// unaffected; operators enable it with `HYPERTIDE_REQUIRE_SEPARATE_APPROVER=1`.
+fn separate_approver_required() -> bool {
+    std::env::var("HYPERTIDE_REQUIRE_SEPARATE_APPROVER")
+        .ok()
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 #[derive(Clone)]
@@ -550,6 +535,14 @@ impl VersionManager {
                 }
             })?;
 
+            if separate_approver_required() && record.author == approver {
+                return Err(VersioningError::SelfApprovalForbidden {
+                    repo_id: repo_id.to_string(),
+                    changeset_id: changeset_id.to_string(),
+                    actor: approver.to_string(),
+                });
+            }
+
             match record.status {
                 ChangesetStatus::Draft => {
                     record.status = ChangesetStatus::Approved;
@@ -604,6 +597,13 @@ impl VersionManager {
                     expected: "approved",
                 });
             }
+            if separate_approver_required() && record_view.author == promoter {
+                return Err(VersioningError::SelfApprovalForbidden {
+                    repo_id: repo_id.to_string(),
+                    changeset_id: changeset_id.to_string(),
+                    actor: promoter.to_string(),
+                });
+            }
 
             let branch = record_view.branch.clone();
             let base = record_view.base_changeset_id.clone();
@@ -615,7 +615,7 @@ impl VersionManager {
                         branch: branch.clone(),
                     })?;
             let expected_head = branch_state.record.head_changeset_id.clone();
-            if expected_head != base {
+            if !head_accepts_base(&expected_head, &base) {
                 return Err(VersioningError::BaseChangesetMismatch {
                     repo_id: repo_id.to_string(),
                     branch,
@@ -687,7 +687,7 @@ impl VersionManager {
                     record.status.as_str()
                 )),
             )
-        } else if current_head != base {
+        } else if !head_accepts_base(&current_head, &base) {
             (
                 false,
                 Some(format!(
@@ -1136,7 +1136,7 @@ impl VersionManager {
             ));
         }
 
-        if let Err(error) = replace_state_file(&temp_path, path) {
+        if let Err(error) = crate::core::file_replace::replace_file(&temp_path, path) {
             return Err(format!(
                 "failed to atomically replace versioning state {}: {}",
                 path.display(),
@@ -1663,6 +1663,56 @@ mod tests {
             .expect("gate for approved");
         assert!(gate_after.can_promote);
         assert_eq!(gate_after.required_state, "approved");
+    }
+
+    #[tokio::test]
+    async fn draft_first_changeset_can_be_promoted() {
+        // Regression: the very first changeset on a branch, submitted as a draft
+        // (base=ROOT), never advances the branch head. Promote/gate must still
+        // accept ROOT against an empty head, otherwise it is permanently stuck.
+        let manager = VersionManager::new();
+
+        let draft = manager
+            .submit_changeset(SubmitChangesetInput {
+                repo_id: "repo-draft-first".to_string(),
+                branch: "main".to_string(),
+                base_changeset_id: Some(ROOT_BASE_CHANGESET_ID.to_string()),
+                kind: ChangesetKind::Normal,
+                rollback_of: None,
+                author: "alice".to_string(),
+                message: "draft-first".to_string(),
+                visibility: ChangesetVisibility::Draft,
+                intent_id: None,
+                task_id: None,
+                agent_run_id: None,
+                session_id: None,
+                parent_checkpoint_id: None,
+                risk_level: None,
+                semantic_summary: None,
+                assets: vec![],
+            })
+            .await
+            .expect("draft-first changeset");
+
+        manager
+            .approve_changeset("repo-draft-first", &draft.changeset_id, "reviewer")
+            .await
+            .expect("approve draft-first");
+
+        let gate = manager
+            .changeset_gate("repo-draft-first", &draft.changeset_id)
+            .expect("gate for approved draft-first");
+        assert!(
+            gate.can_promote,
+            "approved draft-first should be promotable"
+        );
+
+        let promoted = manager
+            .promote_changeset("repo-draft-first", &draft.changeset_id, "release-bot")
+            .await
+            .expect("promote draft-first should succeed");
+        assert_eq!(promoted.status, ChangesetStatus::Visible);
+        assert_eq!(promoted.visible_ref.as_deref(), Some("refs/heads/main"));
     }
 
     #[tokio::test]

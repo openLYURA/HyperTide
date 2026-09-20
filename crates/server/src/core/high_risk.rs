@@ -11,23 +11,35 @@ pub struct HighRiskGuard {
 }
 
 impl HighRiskGuard {
-    pub fn from_env(pool: PgPool) -> Self {
+    pub fn from_env(pool: PgPool) -> Result<Self, String> {
         let required = std::env::var("HIGH_RISK_SIGNATURE_REQUIRED")
             .ok()
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        // Fail closed: never fall back to a hardcoded/shipped signing secret when
+        // enforcement is on. A default secret in open-source code would let anyone
+        // forge a valid X-HT-Signature and defeat the step-up check entirely.
         let secret = std::env::var("HIGH_RISK_SIGNING_SECRET")
-            .unwrap_or_else(|_| "hypertide-dev-signing-secret".to_string());
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        if required && secret.is_none() {
+            return Err(
+                "HIGH_RISK_SIGNATURE_REQUIRED is enabled but HIGH_RISK_SIGNING_SECRET is unset \
+                 or empty; refusing to start with an insecure default signing secret"
+                    .to_string(),
+            );
+        }
+        let secret = secret.unwrap_or_default();
         let skew_secs = std::env::var("HIGH_RISK_SIG_SKEW_SECS")
             .ok()
             .and_then(|value| value.parse::<i64>().ok())
             .unwrap_or(300);
-        Self {
+        Ok(Self {
             pool,
             required,
             secret,
             skew_secs,
-        }
+        })
     }
 
     pub async fn verify(
@@ -72,9 +84,15 @@ impl HighRiskGuard {
             "{}|{}|{}|{}|{}|{}",
             self.secret, action, actor_id, nonce, timestamp, payload_hash
         );
-        let expected = blake3::hash(material.as_bytes()).to_hex().to_string();
-
-        if expected != signature {
+        let expected = blake3::hash(material.as_bytes());
+        // Parse the client signature into a fixed 32-byte digest and compare with
+        // blake3::Hash's constant-time equality, avoiding a byte-by-byte timing
+        // oracle on the expected MAC.
+        let provided = match blake3::Hash::from_hex(signature) {
+            Ok(hash) => hash,
+            Err(_) => return Err("invalid signature".to_string()),
+        };
+        if expected != provided {
             return Err("invalid signature".to_string());
         }
 
