@@ -3,8 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+  # Stacked pull requests must receive the same checks as PRs targeting main.
   pull_request:
-    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
