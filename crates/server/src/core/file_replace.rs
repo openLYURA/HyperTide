@@ -47,9 +47,7 @@ pub(crate) fn replace_file(source: &Path, destination: &Path) -> std::io::Result
         Err(rename_error) if destination.exists() => {
             match replace_existing_file(source, destination) {
                 Ok(()) => Ok(()),
-                Err(replace_error)
-                    if replace_error.kind() == std::io::ErrorKind::NotFound =>
-                {
+                Err(replace_error) if replace_error.kind() == std::io::ErrorKind::NotFound => {
                     std::fs::rename(source, destination)
                 }
                 Err(replace_error) => Err(replace_error),
