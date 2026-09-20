@@ -6,6 +6,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod events;
+pub(crate) mod file_replace;
 pub mod high_risk;
 pub mod lock;
 pub mod open_core;

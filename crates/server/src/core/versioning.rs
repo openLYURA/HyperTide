@@ -25,48 +25,6 @@ fn head_accepts_base(head: &Option<String>, base: &Option<String>) -> bool {
     }
 }
 
-#[cfg(windows)]
-fn replace_state_file(temp_path: &Path, state_path: &Path) -> std::io::Result<()> {
-    use std::iter::once;
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
-
-    if !state_path.exists() {
-        return std::fs::rename(temp_path, state_path);
-    }
-
-    let state_wide = state_path
-        .as_os_str()
-        .encode_wide()
-        .chain(once(0))
-        .collect::<Vec<_>>();
-    let temp_wide = temp_path
-        .as_os_str()
-        .encode_wide()
-        .chain(once(0))
-        .collect::<Vec<_>>();
-    let replaced = unsafe {
-        ReplaceFileW(
-            state_wide.as_ptr(),
-            temp_wide.as_ptr(),
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-        )
-    };
-    if replaced == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(windows))]
-fn replace_state_file(temp_path: &Path, state_path: &Path) -> std::io::Result<()> {
-    std::fs::rename(temp_path, state_path)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangesetKind {
@@ -1178,7 +1136,7 @@ impl VersionManager {
             ));
         }
 
-        if let Err(error) = replace_state_file(&temp_path, path) {
+        if let Err(error) = crate::core::file_replace::replace_file(&temp_path, path) {
             return Err(format!(
                 "failed to atomically replace versioning state {}: {}",
                 path.display(),

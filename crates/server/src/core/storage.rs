@@ -1,6 +1,8 @@
 //! Storage Manager
 //! Handles file upload/download operations with local and S3 backends
 
+mod atomic;
+
 use crate::core::error::HyperTideError;
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
@@ -37,10 +39,19 @@ impl StorageManager {
         Ok(self.storage_root.join("objects").join(prefix).join(rest))
     }
 
-    async fn check_path_exists(path: &Path, context: &str) -> Result<bool, String> {
-        fs::try_exists(path)
-            .await
-            .map_err(|e| format!("Failed to check {}: {}", context, e))
+    async fn check_regular_object(path: &Path, context: &str) -> Result<bool, String> {
+        let metadata = match fs::symlink_metadata(path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(format!("Failed to check {context}: {error}")),
+        };
+        if !metadata.file_type().is_file() {
+            return Err(format!(
+                "CAS object path is not a regular file: {}",
+                path.display()
+            ));
+        }
+        Ok(true)
     }
 
     /// Create a new storage manager with the given root directory
@@ -102,98 +113,20 @@ impl StorageManager {
         hasher.finalize().to_hex().to_string()
     }
 
-    /// Store file content, returns the content hash
-    /// Uses Content-Addressable Storage (CAS) - files stored by their hash
+    /// Store file content, returning its content-addressed identity.
+    /// Existing objects are verified with bounded memory before deduplication.
     pub async fn store(
         &self,
         data: &[u8],
         original_path: &str,
     ) -> Result<StoredFile, HyperTideError> {
         let hash = Self::calculate_hash(data);
-        let size_bytes = data.len() as u64;
-
-        // CAS path: objects/ab/cdef1234... (first 2 chars as subdirectory)
-        let (prefix, rest) = hash.split_at(2);
-        let object_dir = self.storage_root.join("objects").join(prefix);
-        let object_path = object_dir.join(rest);
-
-        // Check if already exists (deduplication). The incoming bytes already hash
-        // to `hash`, so a same-sized object at the CAS path is a dedup hit; trust
-        // the content-addressed layout instead of reading the whole existing object
-        // back into memory and re-hashing it (that doubled transient memory on every
-        // dedup hit). Object integrity is still re-verified on `retrieve`.
-        if Self::check_path_exists(&object_path, "object existence before store")
-            .await
-            .map_err(HyperTideError::Persistence)?
-        {
-            let same_size = match fs::metadata(&object_path).await {
-                Ok(metadata) => metadata.len() == size_bytes,
-                Err(_) => false,
-            };
-            if same_size {
-                return Ok(StoredFile {
-                    hash,
-                    original_path: original_path.to_string(),
-                    size_bytes,
-                    stored_at: chrono::Utc::now(),
-                });
-            }
-            // Size mismatch (or unreadable metadata): the object is corrupt for this
-            // hash; drop it and rewrite. Tolerate a concurrent removal.
-            if let Err(error) = fs::remove_file(&object_path).await {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    return Err(HyperTideError::Persistence(format!(
-                        "Failed to replace corrupt CAS object {hash}: {error}"
-                    )));
-                }
-            }
-        }
-
-        // Create subdirectory if needed
-        fs::create_dir_all(&object_dir).await.map_err(|e| {
-            HyperTideError::Persistence(format!("Failed to create object subdir: {}", e))
-        })?;
-
-        // Write file atomically (write to temp, then rename)
-        let temp_path = self.storage_root.join("temp").join(&hash);
-        let mut file = fs::File::create(&temp_path).await.map_err(|e| {
-            HyperTideError::Persistence(format!("Failed to create temp file: {}", e))
-        })?;
-
-        file.write_all(data)
-            .await
-            .map_err(|e| HyperTideError::Persistence(format!("Failed to write data: {}", e)))?;
-
-        file.sync_all()
-            .await
-            .map_err(|e| HyperTideError::Persistence(format!("Failed to sync file: {}", e)))?;
-
-        // Atomic rename. If another writer already won the race, treat as idempotent success.
-        if let Err(rename_error) = fs::rename(&temp_path, &object_path).await {
-            match Self::check_path_exists(&object_path, "object existence after rename race").await
-            {
-                Ok(true) => {
-                    let _ = fs::remove_file(&temp_path).await;
-                }
-                Ok(false) => {
-                    return Err(HyperTideError::Persistence(format!(
-                        "Failed to move file to storage: {}",
-                        rename_error
-                    )));
-                }
-                Err(exists_error) => {
-                    return Err(HyperTideError::Persistence(format!(
-                        "Failed to move file to storage: {}; additionally failed to verify object existence: {}",
-                        rename_error, exists_error
-                    )));
-                }
-            }
-        }
+        atomic::store(&self.storage_root, &hash, data).await?;
 
         Ok(StoredFile {
             hash,
             original_path: original_path.to_string(),
-            size_bytes,
+            size_bytes: data.len() as u64,
             stored_at: chrono::Utc::now(),
         })
     }
@@ -202,7 +135,7 @@ impl StorageManager {
     pub async fn retrieve(&self, hash: &str) -> Result<Vec<u8>, HyperTideError> {
         let object_path = self.object_path(hash)?;
 
-        if !Self::check_path_exists(&object_path, "object existence before retrieve")
+        if !Self::check_regular_object(&object_path, "object existence before retrieve")
             .await
             .map_err(HyperTideError::Persistence)?
         {
@@ -227,7 +160,7 @@ impl StorageManager {
     /// Check if a file with given hash exists
     pub async fn exists(&self, hash: &str) -> Result<bool, String> {
         let object_path = self.object_path(hash).map_err(|error| error.to_string())?;
-        Self::check_path_exists(&object_path, "object existence").await
+        Self::check_regular_object(&object_path, "object existence").await
     }
 
     /// Get the local file path for a hash (for direct access)
@@ -410,6 +343,38 @@ mod tests {
         assert!(manager.exists("../outside-file").await.is_err());
         assert!(manager.get_path("../outside-file").is_none());
 
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exists_and_retrieve_reject_fifo_object_entries() {
+        let root = make_storage_root("fifo-object");
+        let manager = StorageManager::new(&root);
+        manager.init().await.expect("init storage");
+        let hash = StorageManager::calculate_hash(b"expected");
+        let object_path = manager.get_path(&hash).expect("valid object path");
+        std::fs::create_dir_all(object_path.parent().expect("object parent"))
+            .expect("create object parent");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&object_path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo should succeed");
+
+        let exists_error = manager
+            .exists(&hash)
+            .await
+            .expect_err("FIFO must be a storage inconsistency");
+        assert!(exists_error.contains("not a regular file"));
+
+        let retrieve_error = manager
+            .retrieve(&hash)
+            .await
+            .expect_err("FIFO must be rejected before reading");
+        assert!(retrieve_error.to_string().contains("not a regular file"));
+
+        std::fs::remove_file(object_path).ok();
         std::fs::remove_dir_all(root).ok();
     }
 
