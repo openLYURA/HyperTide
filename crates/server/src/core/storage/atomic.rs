@@ -136,8 +136,8 @@ mod tests {
 
     impl TestStorage {
         async fn new() -> Self {
-            let root = std::env::temp_dir()
-                .join(format!("hypertide-atomic-cas-{}", uuid::Uuid::new_v4()));
+            let root =
+                std::env::temp_dir().join(format!("hypertide-atomic-cas-{}", uuid::Uuid::new_v4()));
             let manager = StorageManager::new(&root);
             manager.init().await.expect("init storage");
             Self { root, manager }
@@ -169,13 +169,22 @@ mod tests {
             .await
             .expect("create existing staging file");
 
-        storage.manager.store(data, "asset.bin").await.expect("store");
+        storage
+            .manager
+            .store(data, "asset.bin")
+            .await
+            .expect("store");
 
         assert_eq!(
-            fs::read(&legacy_temp).await.expect("other staging file remains"),
+            fs::read(&legacy_temp)
+                .await
+                .expect("other staging file remains"),
             b"another writer is still using this file"
         );
-        assert_eq!(storage.manager.retrieve(&hash).await.expect("retrieve"), data);
+        assert_eq!(
+            storage.manager.retrieve(&hash).await.expect("retrieve"),
+            data
+        );
     }
 
     #[tokio::test]
@@ -185,9 +194,16 @@ mod tests {
         let hash = StorageManager::calculate_hash(data);
         storage.seed_object(&hash, b"corrupt!").await;
 
-        storage.manager.store(data, "asset.bin").await.expect("repair");
+        storage
+            .manager
+            .store(data, "asset.bin")
+            .await
+            .expect("repair");
 
-        assert_eq!(storage.manager.retrieve(&hash).await.expect("retrieve"), data);
+        assert_eq!(
+            storage.manager.retrieve(&hash).await.expect("retrieve"),
+            data
+        );
     }
 
     #[tokio::test]
@@ -197,8 +213,12 @@ mod tests {
         let hash = StorageManager::calculate_hash(data);
         let object = storage.seed_object(&hash, b"old").await;
         let temp = storage.root.join("temp");
-        fs::remove_dir(&temp).await.expect("remove staging directory");
-        fs::write(&temp, b"not a directory").await.expect("block staging");
+        fs::remove_dir(&temp)
+            .await
+            .expect("remove staging directory");
+        fs::write(&temp, b"not a directory")
+            .await
+            .expect("block staging");
 
         assert!(storage.manager.store(data, "asset.bin").await.is_err());
         assert_eq!(fs::read(object).await.expect("old object remains"), b"old");
@@ -210,7 +230,9 @@ mod tests {
         let data = b"expected";
         let hash = StorageManager::calculate_hash(data);
         let object = storage.manager.get_path(&hash).expect("valid hash");
-        fs::create_dir_all(&object).await.expect("create invalid target");
+        fs::create_dir_all(&object)
+            .await
+            .expect("create invalid target");
 
         assert!(storage.manager.store(data, "asset.bin").await.is_err());
         assert!(object.is_dir());

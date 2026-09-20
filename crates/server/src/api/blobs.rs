@@ -120,23 +120,18 @@ pub async fn missing_chunks(
     } else {
         None
     };
-    let missing = match find_missing_chunks(
-        &state.storage_manager,
-        unique_hashes,
-        indexed.as_ref(),
-    )
-    .await
-    {
-        Ok(missing) => missing,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::err(format!(
-                    "failed to check chunk existence: {error}"
-                ))),
-            );
-        }
-    };
+    let missing =
+        match find_missing_chunks(&state.storage_manager, unique_hashes, indexed.as_ref()).await {
+            Ok(missing) => missing,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::err(format!(
+                        "failed to check chunk existence: {error}"
+                    ))),
+                );
+            }
+        };
 
     (
         StatusCode::OK,
@@ -256,18 +251,21 @@ mod tests {
     #[tokio::test]
     async fn indexed_but_deleted_chunk_is_requested_again() {
         let storage = TestStorage::new().await;
-        let stored = storage.manager.store(b"chunk", "chunk").await.expect("store");
+        let stored = storage
+            .manager
+            .store(b"chunk", "chunk")
+            .await
+            .expect("store");
         let indexed = HashSet::from([stored.hash.clone()]);
         let object = storage.manager.get_path(&stored.hash).expect("object path");
-        tokio::fs::remove_file(object).await.expect("simulate lost object");
+        tokio::fs::remove_file(object)
+            .await
+            .expect("simulate lost object");
 
-        let missing = find_missing_chunks(
-            &storage.manager,
-            vec![stored.hash.clone()],
-            Some(&indexed),
-        )
-        .await
-        .expect("find missing chunks");
+        let missing =
+            find_missing_chunks(&storage.manager, vec![stored.hash.clone()], Some(&indexed))
+                .await
+                .expect("find missing chunks");
 
         assert_eq!(missing, vec![stored.hash]);
     }
@@ -275,16 +273,17 @@ mod tests {
     #[tokio::test]
     async fn unindexed_chunk_is_requested_even_when_content_exists() {
         let storage = TestStorage::new().await;
-        let stored = storage.manager.store(b"chunk", "chunk").await.expect("store");
+        let stored = storage
+            .manager
+            .store(b"chunk", "chunk")
+            .await
+            .expect("store");
         let indexed = HashSet::new();
 
-        let missing = find_missing_chunks(
-            &storage.manager,
-            vec![stored.hash.clone()],
-            Some(&indexed),
-        )
-        .await
-        .expect("find missing chunks");
+        let missing =
+            find_missing_chunks(&storage.manager, vec![stored.hash.clone()], Some(&indexed))
+                .await
+                .expect("find missing chunks");
 
         assert_eq!(missing, vec![stored.hash]);
     }
@@ -292,7 +291,11 @@ mod tests {
     #[tokio::test]
     async fn intact_indexed_chunks_do_not_need_retransmission() {
         let storage = TestStorage::new().await;
-        let stored = storage.manager.store(b"chunk", "chunk").await.expect("store");
+        let stored = storage
+            .manager
+            .store(b"chunk", "chunk")
+            .await
+            .expect("store");
         let indexed = HashSet::from([stored.hash.clone()]);
 
         let missing = find_missing_chunks(&storage.manager, vec![stored.hash], Some(&indexed))
@@ -305,16 +308,17 @@ mod tests {
     #[tokio::test]
     async fn without_a_database_presence_is_checked_in_storage() {
         let storage = TestStorage::new().await;
-        let stored = storage.manager.store(b"chunk", "chunk").await.expect("store");
+        let stored = storage
+            .manager
+            .store(b"chunk", "chunk")
+            .await
+            .expect("store");
         let absent = StorageManager::calculate_hash(b"not uploaded");
 
-        let missing = find_missing_chunks(
-            &storage.manager,
-            vec![stored.hash, absent.clone()],
-            None,
-        )
-        .await
-        .expect("find missing chunks");
+        let missing =
+            find_missing_chunks(&storage.manager, vec![stored.hash, absent.clone()], None)
+                .await
+                .expect("find missing chunks");
 
         assert_eq!(missing, vec![absent]);
     }
